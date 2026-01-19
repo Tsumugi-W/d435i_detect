@@ -299,6 +299,9 @@ def parse_model(d, ch):  # model_dict, input_channels(3)
         ch.append(c2)
     return nn.Sequential(*layers), sorted(save)
 
+# Alias for backward compatibility with older YOLOv5 weights
+DetectionModel = Model
+
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
