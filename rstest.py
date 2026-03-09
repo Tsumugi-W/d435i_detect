@@ -22,6 +22,14 @@ import numpy as np
 import sys
 
 import cv2
+
+# ROS2
+import rclpy
+from rclpy.node import Node
+from geometry_msgs.msg import Point
+from std_msgs.msg import String
+from vision_msgs.msg import Detection3DArray, Detection3D, ObjectHypothesisWithPose
+from geometry_msgs.msg import Pose
 # PyTorch
 # YoloV5-PyTorch
 
@@ -32,6 +40,66 @@ config.enable_stream(rs.stream.color, 848, 480, rs.format.bgr8, 30)
 profile = pipeline.start(config)  # 流程开始
 align_to = rs.stream.color  # 与color流对齐
 align = rs.align(align_to)
+
+
+def undistort_pixel(u, v, intr, iterations=5):
+    """
+    将畸变的像素坐标转换为理想坐标（去畸变）
+
+    使用 Brown-Conrady 畸变模型的反演
+
+    Args:
+        u, v: 实际像素坐标
+        intr: RealSense 内参对象，包含 fx, fy, ppx, ppy, coeffs
+        iterations: 迭代次数（通常 3-5 次收敛）
+
+    Returns:
+        u_ideal, v_ideal: 去畸变后的理想像素坐标
+    """
+    # 相机内参
+    fx, fy = intr.fx, intr.fy
+    cx, cy = intr.ppx, intr.ppy
+
+    # 畸变系数 [k1, k2, p1, p2, k3]
+    coeffs = intr.coeffs
+    if len(coeffs) >= 5:
+        k1, k2, p1, p2, k3 = coeffs[0], coeffs[1], coeffs[2], coeffs[3], coeffs[4]
+    else:
+        # 如果系数不足，用 0 填充
+        k1 = coeffs[0] if len(coeffs) > 0 else 0
+        k2 = coeffs[1] if len(coeffs) > 1 else 0
+        p1 = coeffs[2] if len(coeffs) > 2 else 0
+        p2 = coeffs[3] if len(coeffs) > 3 else 0
+        k3 = coeffs[4] if len(coeffs) > 4 else 0
+
+    # 转换为归一化坐标
+    x = (u - cx) / fx
+    y = (v - cy) / fy
+
+    # 迭代求解理想坐标（牛顿法反演）
+    for _ in range(iterations):
+        r2 = x**2 + y**2
+
+        # 计算径向和切向畸变
+        radial = 1 + k1*r2 + k2*r2**2 + k3*r2**3
+        dx = 2*p1*x*y + p2*(r2 + 2*x**2)
+        dy = p1*(r2 + 2*y**2) + 2*p2*x*y
+
+        # 反演：从畸变坐标恢复理想坐标
+        x_new = (x - dx) / radial
+        y_new = (y - dy) / radial
+
+        # 检查收敛
+        if abs(x_new - x) < 1e-6 and abs(y_new - y) < 1e-6:
+            break
+
+        x, y = x_new, y_new
+
+    # 转换回像素坐标
+    u_ideal = x * fx + cx
+    v_ideal = y * fy + cy
+
+    return u_ideal, v_ideal
 
 
 def get_aligned_images():
@@ -194,15 +262,33 @@ class YoloV5:
                         [225, 255, 255], thickness=tf, lineType=cv2.LINE_AA)
 
 
-if __name__ == '__main__':
-    print("[INFO] YoloV5目标检测-程序启动")
-    print("[INFO] 开始YoloV5模型加载")
-    # YOLOV5模型配置文件(YAML格式)的路径 yolov5_yaml_path
-    model = YoloV5(yolov5_yaml_path='config/yolov5s.yaml')
-    print("[INFO] 完成YoloV5模型加载")
-
-    try:
-        while True:
+class DetectionPublisher(Node):
+    def __init__(self):
+        super().__init__('yolov5_detection_publisher')
+        
+        # 创建发布者
+        self.detection_pub = self.create_publisher(
+            Detection3DArray, 
+            'detection_3d', 
+            10
+        )
+        
+        # 创建简单坐标发布者 (可选)
+        self.coords_pub = self.create_publisher(
+            String,
+            'detection_coords',
+            10
+        )
+        
+        print("[INFO] YoloV5目标检测-程序启动")
+        print("[INFO] 开始YoloV5模型加载")
+        self.model = YoloV5(yolov5_yaml_path='config/yolov5s.yaml')
+        print("[INFO] 完成YoloV5模型加载")
+        
+        self.timer = self.create_timer(0.033, self.detection_callback)  # 30Hz
+        
+    def detection_callback(self):
+        try:
             # Wait for a coherent pair of frames: depth and color
             intr, depth_intrin, color_image, depth_image, aligned_depth_frame = get_aligned_images()  # 获取对齐的图像与相机内参
             if not depth_image.any() or not color_image.any():
@@ -218,7 +304,7 @@ if __name__ == '__main__':
 
             t_start = time.time()  # 开始计时
             # YoloV5 目标检测
-            canvas, class_id_list, xyxy_list, conf_list = model.detect(
+            canvas, class_id_list, xyxy_list, conf_list = self.model.detect(
                 color_image)
 
             t_end = time.time()  # 结束计时\
@@ -230,16 +316,27 @@ if __name__ == '__main__':
                 for i in range(len(xyxy_list)):
                     ux = int((xyxy_list[i][0]+xyxy_list[i][2])/2)  # 计算像素坐标系的x
                     uy = int((xyxy_list[i][1]+xyxy_list[i][3])/2)  # 计算像素坐标系的y
-                    dis = aligned_depth_frame.get_distance(ux, uy)
+
+                    # 去畸变：将畸变的像素坐标转换为理想坐标
+                    ux_undistorted, uy_undistorted = undistort_pixel(ux, uy, intr)
+                    ux_undistorted = int(ux_undistorted)
+                    uy_undistorted = int(uy_undistorted)
+
+                    # 使用去畸变后的坐标获取深度值
+                    dis = aligned_depth_frame.get_distance(ux_undistorted, uy_undistorted)
+
+                    # 使用去畸变后的坐标进行 3D 转换
                     camera_xyz = rs.rs2_deproject_pixel_to_point(
-                        depth_intrin, (ux, uy), dis)  # 计算相机坐标系的xyz
+                        depth_intrin, (ux_undistorted, uy_undistorted), dis)  # 计算相机坐标系的xyz
                     camera_xyz = np.round(np.array(camera_xyz), 3)  # 转成3位小数
                     camera_xyz = camera_xyz.tolist()
                     cv2.circle(canvas, (ux,uy), 4, (255, 255, 255), 5)#标出中心点
                     cv2.putText(canvas, str(camera_xyz), (ux+20, uy+10), 0, 1,
                                 [225, 255, 255], thickness=2, lineType=cv2.LINE_AA)#标出坐标
                     camera_xyz_list.append(camera_xyz)
-            #print(camera_xyz_list)
+            
+            # 发布ROS2消息
+            self.publish_detections(camera_xyz_list, class_id_list, conf_list)
 
             # 添加fps显示
             fps = int(1.0 / (t_end - t_start))
@@ -253,7 +350,60 @@ if __name__ == '__main__':
             # Press esc or 'q' to close the image window
             if key & 0xFF == ord('q') or key == 27:
                 cv2.destroyAllWindows()
-                break
+                raise KeyboardInterrupt
+        except KeyboardInterrupt:
+            pass
+        except Exception as e:
+            self.get_logger().error(f'Error in detection: {str(e)}')
+    
+    def publish_detections(self, camera_xyz_list, class_id_list, conf_list):
+        '''发布检测结果到ROS2话题'''
+        # 发布标准Detection3DArray消息
+        detection_array = Detection3DArray()
+        detection_array.header.stamp = self.get_clock().now().to_msg()
+        detection_array.header.frame_id = 'camera_link'
+        
+        for i, xyz in enumerate(camera_xyz_list):
+            detection = Detection3D()
+            
+            # 设置位置
+            detection.bbox.center.position.x = float(xyz[0])
+            detection.bbox.center.position.y = float(xyz[1])
+            detection.bbox.center.position.z = float(xyz[2])
+            
+            # 设置类别和置信度
+            if i < len(class_id_list):
+                hypothesis = ObjectHypothesisWithPose()
+                hypothesis.hypothesis.class_id = str(class_id_list[i])
+                hypothesis.hypothesis.score = float(conf_list[i])
+                detection.results.append(hypothesis)
+            
+            detection_array.detections.append(detection)
+        
+        self.detection_pub.publish(detection_array)
+        
+        # 同时发布简单字符串格式 (可选)
+        coords_msg = String()
+        coords_msg.data = str(camera_xyz_list)
+        self.coords_pub.publish(coords_msg)
+        
+        self.get_logger().info(f'Published {len(camera_xyz_list)} detections')
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    
+    try:
+        node = DetectionPublisher()
+        rclpy.spin(node)
+    except KeyboardInterrupt:
+        pass
     finally:
-        # Stop streaming
         pipeline.stop()
+        if rclpy.ok():
+            rclpy.shutdown()
+        cv2.destroyAllWindows()
+
+
+if __name__ == '__main__':
+    main()
