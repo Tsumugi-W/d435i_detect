@@ -22,14 +22,14 @@ import numpy as np
 import sys
 
 import cv2
-
-# ROS2
 import rclpy
 from rclpy.node import Node
 from geometry_msgs.msg import Point
 from std_msgs.msg import String
 from vision_msgs.msg import Detection3DArray, Detection3D, ObjectHypothesisWithPose
 from geometry_msgs.msg import Pose
+from collections import deque
+
 # PyTorch
 # YoloV5-PyTorch
 
@@ -100,6 +100,140 @@ def undistort_pixel(u, v, intr, iterations=5):
     v_ideal = y * fy + cy
 
     return u_ideal, v_ideal
+
+
+def filter_depth(depth_frame, method='bilateral', kernel_size=5):
+    """
+    对深度帧进行滤波，降低深度噪声
+
+    Args:
+        depth_frame: RealSense 深度帧对象
+        method: 滤波方法 'median', 'bilateral', 'gaussian'
+        kernel_size: 核大小（必须为奇数）
+
+    Returns:
+        滤波后的深度图（numpy 数组）
+    """
+    depth_image = np.asanyarray(depth_frame.get_data())
+
+    if method == 'median':
+        # 中值滤波（保留边界）
+        filtered = cv2.medianBlur(depth_image, kernel_size)
+
+    elif method == 'bilateral':
+        # 双边滤波（保留边界，平滑内部）
+        filtered = cv2.bilateralFilter(
+            depth_image.astype(np.float32),
+            kernel_size,
+            sigma_color=75,
+            sigma_space=75
+        ).astype(depth_image.dtype)
+
+    elif method == 'gaussian':
+        # 高斯滤波（最平滑）
+        filtered = cv2.GaussianBlur(depth_image, (kernel_size, kernel_size), 0)
+
+    else:
+        filtered = depth_image
+
+    return filtered
+
+
+def get_robust_depth(depth_image, ux, uy, sample_radius=3, depth_scale=0.001):
+    """
+    从中心点周围采样多个深度值，取中位数（鲁棒性强）
+
+    Args:
+        depth_image: 深度图（numpy 数组）
+        ux, uy: 中心像素坐标
+        sample_radius: 采样半径（像素）
+        depth_scale: 深度缩放因子
+
+    Returns:
+        鲁棒的深度值（米）
+    """
+    depths = []
+
+    for dx in range(-sample_radius, sample_radius + 1):
+        for dy in range(-sample_radius, sample_radius + 1):
+            x = max(0, min(depth_image.shape[1] - 1, ux + dx))
+            y = max(0, min(depth_image.shape[0] - 1, uy + dy))
+
+            d = depth_image[y, x]
+            if d > 0:  # 有效深度
+                depths.append(d * depth_scale)
+
+    if depths:
+        # 取中位数（鲁棒性强，不受异常值影响）
+        return np.median(depths)
+    else:
+        return 0
+
+
+class MultiFrameTracker:
+    """
+    多帧融合追踪器，对多帧检测结果进行加权平均
+    """
+
+    def __init__(self, window_size=5, decay_factor=0.8):
+        """
+        初始化多帧追踪器
+
+        Args:
+            window_size: 融合帧数
+            decay_factor: 时间衰减因子（越新的帧权重越大）
+        """
+        self.window_size = window_size
+        self.decay_factor = decay_factor
+        self.history = deque(maxlen=window_size)
+
+    def update(self, detections):
+        """
+        更新检测结果，返回融合后的结果
+
+        Args:
+            detections: 当前帧的检测结果 [(x1,y1,x2,y2), ...]
+
+        Returns:
+            融合后的检测结果 [(x1,y1,x2,y2), ...]
+        """
+        self.history.append(detections)
+
+        if len(self.history) < 2:
+            return detections
+
+        # 计算加权平均
+        fused_detections = []
+
+        for i, det in enumerate(detections):
+            x1, y1, x2, y2 = det
+
+            # 收集历史中的对应检测
+            historical_coords = []
+            weights = []
+
+            for frame_idx, frame_dets in enumerate(self.history):
+                if i < len(frame_dets):
+                    hist_det = frame_dets[i]
+                    historical_coords.append(hist_det[:4])
+
+                    # 时间衰减权重（越新的帧权重越大）
+                    weight = self.decay_factor ** (len(self.history) - frame_idx - 1)
+                    weights.append(weight)
+
+            if historical_coords:
+                # 加权平均坐标
+                weights = np.array(weights)
+                weights = weights / weights.sum()
+
+                fused_coords = np.average(historical_coords, axis=0, weights=weights)
+                x1, y1, x2, y2 = fused_coords
+
+                fused_detections.append((x1, y1, x2, y2))
+            else:
+                fused_detections.append(det)
+
+        return fused_detections
 
 
 def get_aligned_images():
@@ -284,7 +418,11 @@ class DetectionPublisher(Node):
         print("[INFO] 开始YoloV5模型加载")
         self.model = YoloV5(yolov5_yaml_path='config/yolov5s.yaml')
         print("[INFO] 完成YoloV5模型加载")
-        
+
+        # 初始化多帧融合追踪器
+        self.tracker = MultiFrameTracker(window_size=5, decay_factor=0.8)
+        print("[INFO] 多帧融合追踪器已初始化（窗口大小：5）")
+
         self.timer = self.create_timer(0.033, self.detection_callback)  # 30Hz
         
     def detection_callback(self):
@@ -307,9 +445,15 @@ class DetectionPublisher(Node):
             canvas, class_id_list, xyxy_list, conf_list = self.model.detect(
                 color_image)
 
+            # 多帧融合：对检测结果进行加权平均
+            xyxy_list = self.tracker.update(xyxy_list)
+
             t_end = time.time()  # 结束计时\
             #canvas = np.hstack((canvas, depth_colormap))
             #print(class_id_list)
+
+            # 深度滤波：使用双边滤波降低深度噪声
+            filtered_depth = filter_depth(aligned_depth_frame, method='bilateral', kernel_size=5)
 
             camera_xyz_list=[]
             if xyxy_list:
@@ -322,8 +466,9 @@ class DetectionPublisher(Node):
                     ux_undistorted = int(ux_undistorted)
                     uy_undistorted = int(uy_undistorted)
 
-                    # 使用去畸变后的坐标获取深度值
-                    dis = aligned_depth_frame.get_distance(ux_undistorted, uy_undistorted)
+                    # 多点采样：从周围采样多个深度值，取中位数（鲁棒性强）
+                    dis = get_robust_depth(filtered_depth, ux_undistorted, uy_undistorted,
+                                          sample_radius=3, depth_scale=0.001)
 
                     # 使用去畸变后的坐标进行 3D 转换
                     camera_xyz = rs.rs2_deproject_pixel_to_point(
