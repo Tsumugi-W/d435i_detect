@@ -430,7 +430,7 @@ class DetectionPublisher(Node):
             # Wait for a coherent pair of frames: depth and color
             intr, depth_intrin, color_image, depth_image, aligned_depth_frame = get_aligned_images()  # 获取对齐的图像与相机内参
             if not depth_image.any() or not color_image.any():
-                continue
+                return
             # Convert images to numpy arrays
             # Apply colormap on depth image (image must be converted to 8-bit per pixel first)
             depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(
