@@ -14,4 +14,4 @@ threshold:
 # 计算设备
 # - cpu
 # - 0 <- 使用GPU
-device: '0'
+device: 'cpu'

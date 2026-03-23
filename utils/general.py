@@ -23,7 +23,13 @@ from zipfile import ZipFile
 import cv2
 import numpy as np
 import pandas as pd
-import pkg_resources as pkg
+try:
+    import pkg_resources as pkg
+except ImportError:
+    class pkg:
+        def parse_version(x): return x
+        def parse_requirements(x): return []
+        def require(x): pass
 import torch
 import torchvision
 import yaml
