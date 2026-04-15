@@ -1,5 +1,24 @@
+# 虚拟环境 & 缓存
 .venv/
 __pycache__/
 *.pyc
+
+# IDE & 系统
 .DS_Store
 .idea/
+
+# 模型中间产物
+*.onnx
+*.rknn
+
+# pip 安装产生的垃圾文件
+=*
+
+# SDK 日志
+Log/
+
+# 安装脚本残留
+fishros
+
+# 录制数据（按需提交）
+recordings/

@@ -50,4 +50,6 @@ setuptools>=70.0.0 # Snyk vulnerability fix
 # albumentations>=1.0.3
 # pycocotools>=2.0.6  # COCO mAP
 urllib3>=2.6.0 ; python_version > "3.8" # not directly required, pinned by Snyk to avoid a vulnerability
-pyrealsense2
+# 相机 SDK（根据平台选择一个）
+# pyrealsense2             # Intel RealSense D435i (x86)
+pyorbbecsdk2               # Orbbec Gemini 336 (RK3588/x86)，import 名仍为 pyorbbecsdk

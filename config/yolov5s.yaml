@@ -1,4 +1,18 @@
 ####################################
+# 相机配置
+camera_backend: 'orbbec'    # 'realsense' | 'orbbec'
+camera:
+  color_width: 640
+  color_height: 480
+  depth_width: 640
+  depth_height: 480
+  fps: 30
+
+# 推理后端配置
+inference_backend: 'pytorch'  # 'pytorch' | 'rknn'
+rknn_model: 'weights/yolov5s.rknn'
+
+####################################
 # YoloV5模型权重路径
 weight:  "weights/yolov5s.pt"
 # 输入图像的尺寸

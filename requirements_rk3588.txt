@@ -1,0 +1,19 @@
+# RK3588 平台专用依赖
+#
+# 基础依赖 (pip install -r requirements.txt) 之外的平台特定包
+#
+# 注意：以下包部分需要从特定来源安装，不在 PyPI 上
+
+# 相机 SDK
+pyorbbecsdk
+
+# PyTorch ARM64 (从官方 ARM wheel 安装)
+# pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# RKNN 推理 (从 Rockchip SDK 安装)
+# 安装方式:
+#   1. 从 https://github.com/airockchip/rknn-toolkit2 下载
+#   2. pip install rknn_toolkit_lite2-x.x.x-cpXX-cpXX-linux_aarch64.whl
+#
+# 模型转换 (仅 x86 主机需要):
+#   pip install rknn-toolkit2
