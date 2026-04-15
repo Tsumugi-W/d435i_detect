@@ -13,6 +13,7 @@
 """
 import argparse
 import time
+import threading
 import yaml
 import random
 import numpy as np
@@ -25,9 +26,60 @@ from depth_utils import (
 )
 
 
+class AsyncCamera:
+    """异步取帧：独立线程持续取帧，主线程直接读最新帧，不阻塞推理"""
+
+    def __init__(self, cam):
+        self._cam = cam
+        self._frame = (None, None, None, None)
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while self._running:
+            result = self._cam.get_aligned_frames()
+            if result[0] is not None:
+                with self._lock:
+                    self._frame = result
+
+    def get_aligned_frames(self):
+        with self._lock:
+            return self._frame
+
+    def get_depth_scale(self):
+        return self._cam.get_depth_scale()
+
+    def stop(self):
+        self._running = False
+        self._thread.join(timeout=2)
+        self._cam.stop()
+
+
 def load_config(config_path):
     with open(config_path, 'r', encoding='utf-8') as f:
         return yaml.load(f.read(), Loader=yaml.SafeLoader)
+
+
+def _try_set_names_from_pt(detector, pt_path):
+    """尝试从 .pt 文件中提取类别名给 ONNX 检测器"""
+    try:
+        import torch
+        ckpt = torch.load(pt_path, map_location='cpu', weights_only=False)
+        model = ckpt.get('ema') or ckpt.get('model')
+        if hasattr(model, 'names') and model.names:
+            names = model.names
+            if isinstance(names, dict):
+                detector.class_names = [names[i] for i in sorted(names.keys())]
+            else:
+                detector.class_names = list(names)
+            detector.class_num = len(detector.class_names)
+            detector.colors = [[random.randint(0, 255) for _ in range(3)]
+                               for _ in range(detector.class_num)]
+            print(f'[INFO] 使用模型内置类别: {detector.class_names}')
+    except Exception:
+        pass
 
 
 def create_detector(cfg, config_path, weight_override=None, backend_override=None):
@@ -40,6 +92,15 @@ def create_detector(cfg, config_path, weight_override=None, backend_override=Non
         rknn_model = cfg.get('rknn_model', 'weights/yolov5s.rknn')
         print(f'[INFO] 推理后端: RKNN NPU ({rknn_model})')
         return YoloV5RKNN(rknn_model_path=rknn_model, config_path=config_path)
+
+    if backend == 'onnx':
+        from detector_onnx import YoloV5ORT
+        onnx_path = weight.replace('.pt', '.onnx')
+        threads = cfg.get('onnx_threads', 4)
+        ort_det = YoloV5ORT(onnx_path=onnx_path, config_path=config_path, threads=threads)
+        # 用模型权重推断类别名（onnx 没有内嵌 names，需要从 pt 加载）
+        _try_set_names_from_pt(ort_det, weight)
+        return ort_det
 
     # PyTorch 后端
     from utils.torch_utils import select_device, time_sync
@@ -136,7 +197,7 @@ def main():
     parser.add_argument('--config', default='config/yolov5s.yaml', help='配置文件路径')
     parser.add_argument('--weight', default='best.pt', help='模型权重路径')
     parser.add_argument('--camera', default=None, help='相机后端: orbbec / realsense')
-    parser.add_argument('--backend', default=None, help='推理后端: pytorch / rknn')
+    parser.add_argument('--backend', default=None, help='推理后端: pytorch / onnx / rknn')
     parser.add_argument('--no-depth', action='store_true', help='只检测不计算 3D 坐标')
     args = parser.parse_args()
 
@@ -153,8 +214,10 @@ def main():
     fps = cam_cfg.get('fps', 30)
 
     print(f'[INFO] 相机: {backend_type}  分辨率: {cw}x{ch}@{fps}fps')
-    cam = create_backend(backend_type)
-    cam.initialize(cw, ch, dw, dh, fps)
+    raw_cam = create_backend(backend_type)
+    raw_cam.initialize(cw, ch, dw, dh, fps)
+    cam = AsyncCamera(raw_cam)
+    print(f'[INFO] 异步取帧已启动')
 
     # ── 初始化检测器 ──────────────────────────────────────────────
     detector = create_detector(cfg, args.config,

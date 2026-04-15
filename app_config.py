@@ -65,7 +65,12 @@ def create_detector(config_path=None):
         rknn_model = config.get('rknn_model', 'weights/yolov5s.rknn')
         print(f'[INFO] 推理后端: RKNN NPU ({rknn_model})')
         return YoloV5RKNN(rknn_model_path=rknn_model, config_path=path)
+    elif inference_backend == 'onnx':
+        from detector_onnx import YoloV5ORT
+        onnx_model = config.get('onnx_model', 'best.onnx')
+        threads = config.get('onnx_threads', 4)
+        print(f'[INFO] 推理后端: ONNX Runtime ({onnx_model}, {threads} threads)')
+        return YoloV5ORT(onnx_path=onnx_model, config_path=path, threads=threads)
     else:
-        # 延迟导入，避免没用到时也依赖 torch
         print(f'[INFO] 推理后端: PyTorch CPU/GPU')
         return None  # 返回 None 表示使用脚本内置的 YoloV5 类

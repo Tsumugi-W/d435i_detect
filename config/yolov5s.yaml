@@ -9,7 +9,9 @@ camera:
   fps: 30
 
 # 推理后端配置
-inference_backend: 'pytorch'  # 'pytorch' | 'rknn'
+inference_backend: 'onnx'     # 'pytorch' | 'onnx' | 'rknn'
+onnx_model: 'best.onnx'
+onnx_threads: 4               # ONNX Runtime CPU 线程数
 rknn_model: 'weights/yolov5s.rknn'
 
 ####################################

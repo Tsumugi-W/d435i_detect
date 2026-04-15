@@ -34,10 +34,42 @@ from depth_utils import (
     deproject_pixel_to_point, undistort_pixel,
     filter_depth, get_robust_depth,
 )
+import threading
 import app_config
 
-# 相机实例（由 main() 中 app_config.init_camera() 初始化）
+# 相机实例（由 main() 中初始化）
 camera = None
+
+
+class AsyncCamera:
+    """异步取帧：独立线程持续取帧，主线程直接读最新帧"""
+
+    def __init__(self, cam):
+        self._cam = cam
+        self._frame = (None, None, None, None)
+        self._lock = threading.Lock()
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def _loop(self):
+        while self._running:
+            result = self._cam.get_aligned_frames()
+            if result[0] is not None:
+                with self._lock:
+                    self._frame = result
+
+    def get_aligned_frames(self):
+        with self._lock:
+            return self._frame
+
+    def get_depth_scale(self):
+        return self._cam.get_depth_scale()
+
+    def stop(self):
+        self._running = False
+        self._thread.join(timeout=2)
+        self._cam.stop()
 
 
 def get_aligned_images():
@@ -313,7 +345,8 @@ class DetectionPublisher(Node):
 def main(args=None):
     global camera
     app_config.load_config()
-    camera = app_config.init_camera()
+    raw_cam = app_config.init_camera()
+    camera = AsyncCamera(raw_cam)
 
     rclpy.init(args=args)
 
