@@ -24,6 +24,7 @@ from depth_utils import (
     deproject_pixel_to_point, undistort_pixel,
     filter_depth, get_robust_depth, compute_panel_normal,
 )
+from knob_angle import estimate_knob_angle, draw_knob_angle
 
 
 class AsyncCamera:
@@ -226,6 +227,13 @@ def main():
     depth_scale = cam.get_depth_scale()
     compute_3d = not args.no_depth
 
+    # ── 旋钮角度估计配置 ─────────────────────────────────────────
+    angle_cfg = cfg.get('knob_angle', {})
+    angle_enable = angle_cfg.get('enable', False)
+    angle_binary_thresh = angle_cfg.get('binary_thresh', 180)
+    angle_circle_mask = angle_cfg.get('circle_mask_ratio', 0.85)
+    angle_knob_class = angle_cfg.get('knob_class', 'knob')
+
     # 面板法向量缓存（不需要每帧都算）
     panel_normal_cache = None
     panel_normal_frame_count = 0
@@ -233,6 +241,7 @@ def main():
 
     print(f'[INFO] 深度缩放因子: {depth_scale}')
     print(f'[INFO] 3D 坐标 + 面板法向量: {"开启" if compute_3d else "关闭"}')
+    print(f'[INFO] 旋钮角度估计: {"开启" if angle_enable else "关闭"}')
     print('[INFO] 按 q 或 ESC 退出')
     print('=' * 50)
 
@@ -286,6 +295,24 @@ def main():
                     cv2.circle(canvas, (ux, uy), 4, (255, 255, 255), 5)
                     cv2.putText(canvas, str(xyz), (ux + 20, uy + 10), 0, 0.6,
                                 [225, 255, 255], thickness=2, lineType=cv2.LINE_AA)
+
+            # ── 旋钮角度估计 ─────────────────────────────────────
+            if angle_enable and xyxy_list:
+                for i, xyxy in enumerate(xyxy_list):
+                    cls_name = detector.class_names[class_id_list[i]] \
+                        if class_id_list[i] < len(detector.class_names) else ''
+                    if cls_name != angle_knob_class:
+                        continue
+                    x1, y1 = int(xyxy[0]), int(xyxy[1])
+                    x2, y2 = int(xyxy[2]), int(xyxy[3])
+                    roi = color_image[y1:y2, x1:x2]
+                    angle = estimate_knob_angle(
+                        roi,
+                        binary_thresh=angle_binary_thresh,
+                        circle_mask_ratio=angle_circle_mask,
+                    )
+                    if angle is not None:
+                        draw_knob_angle(canvas, xyxy, angle)
 
             # ── FPS + 深度伪彩色 ─────────────────────────────────
             fps_val = int(1.0 / max(t_end - t_start, 1e-6))

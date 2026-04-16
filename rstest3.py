@@ -31,6 +31,7 @@ from depth_utils import (
 )
 import threading
 import app_config
+from knob_angle import estimate_knob_angle, draw_knob_angle
 
 # 相机实例（由 main() 中初始化）
 camera = None
@@ -314,6 +315,13 @@ class DetectionPublisher(Node):
         self._panel_normal_frame_count = 0
         self.panel_normal_update_interval = 10
 
+        # 旋钮角度估计配置
+        angle_cfg = app_config.config.get('knob_angle', {})
+        self._angle_enable = angle_cfg.get('enable', False)
+        self._angle_binary_thresh = angle_cfg.get('binary_thresh', 180)
+        self._angle_circle_mask = angle_cfg.get('circle_mask_ratio', 0.85)
+        self._angle_knob_class = angle_cfg.get('knob_class', 'knob')
+
         self.timer = self.create_timer(0.033, self.detection_callback)
 
     def detection_callback(self):
@@ -366,7 +374,30 @@ class DetectionPublisher(Node):
                 cv2.putText(canvas, str(camera_xyz), (ux + 20, uy + 10), 0, 0.7,
                             [225, 255, 255], thickness=2, lineType=cv2.LINE_AA)
 
-            self.publish_detections(camera_xyz_list, class_id_list, conf_list, panel_normal)
+            # ── 旋钮角度估计 ─────────────────────────────────────
+            angle_list = [None] * len(xyxy_list)
+            if self._angle_enable:
+                class_names = getattr(self.model, 'class_names', None) or \
+                    app_config.config.get('class_name', [])
+                for i, xyxy in enumerate(xyxy_list):
+                    cls_name = class_names[class_id_list[i]] \
+                        if class_id_list[i] < len(class_names) else ''
+                    if cls_name != self._angle_knob_class:
+                        continue
+                    x1, y1 = int(xyxy[0]), int(xyxy[1])
+                    x2, y2 = int(xyxy[2]), int(xyxy[3])
+                    roi = color_image[y1:y2, x1:x2]
+                    angle = estimate_knob_angle(
+                        roi,
+                        binary_thresh=self._angle_binary_thresh,
+                        circle_mask_ratio=self._angle_circle_mask,
+                    )
+                    if angle is not None:
+                        angle_list[i] = angle
+                        draw_knob_angle(canvas, xyxy, angle)
+
+            self.publish_detections(camera_xyz_list, class_id_list, conf_list,
+                                    panel_normal, angle_list)
 
             fps = int(1.0 / max(t_end - t_start, 1e-6))
             cv2.putText(canvas, 'FPS: {}'.format(fps), (50, 50),
@@ -382,7 +413,8 @@ class DetectionPublisher(Node):
         except Exception as e:
             self.get_logger().error(f'Error: {e}')
 
-    def publish_detections(self, camera_xyz_list, class_id_list, conf_list, panel_normal=None):
+    def publish_detections(self, camera_xyz_list, class_id_list, conf_list,
+                           panel_normal=None, angle_list=None):
         detection_array = Detection3DArray()
         detection_array.header.stamp = self.get_clock().now().to_msg()
         detection_array.header.frame_id = 'camera_link'
@@ -409,9 +441,12 @@ class DetectionPublisher(Node):
         self.detection_pub.publish(detection_array)
 
         coords_msg = String()
+        angles = [angle_list[i] if angle_list else None
+                  for i in range(len(camera_xyz_list))]
         coords_msg.data = str({
             'xyz': camera_xyz_list,
-            'panel_normal': panel_normal.tolist() if panel_normal is not None else None
+            'panel_normal': panel_normal.tolist() if panel_normal is not None else None,
+            'knob_angles': angles,
         })
         self.coords_pub.publish(coords_msg)
         self.get_logger().info(f'Published {len(camera_xyz_list)} detections')

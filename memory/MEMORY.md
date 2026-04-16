@@ -1,0 +1,2 @@
+- [Project Overview](project_overview.md) — YOLOv5 3D detection for RK3588 + Orbbec, knob/indicator detection on panels
+- [User Environment](user_environment.md) — macOS dev (read/edit only), target is RK3588 aarch64 Linux
