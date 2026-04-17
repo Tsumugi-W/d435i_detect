@@ -1,8 +1,8 @@
 # YOLOv5 3D Detection — RK3588 + Orbbec Gemini 336
 
-**基于 YOLOv5 的实时 3D 目标检测系统，支持 ROS2 消息发布。**
+**基于 YOLOv5 的实时 3D 目标检测系统，支持旋钮角度估计和 ROS2 消息发布。**
 
-检测操作面板上的旋钮/指示灯，输出 3D 坐标和面板法向量。
+检测操作面板上的旋钮/指示灯，输出 3D 坐标、面板法向量和旋钮旋转角度。
 
 ## 平台
 
@@ -25,7 +25,7 @@ source .venv/bin/activate
 # 2. 一键检测（不依赖 ROS2）
 python run.py
 
-# 3. ROS2 版（面板法向量 + 话题发布）
+# 3. ROS2 版（话题发布）
 source /opt/ros/humble/setup.bash
 python rstest3.py
 ```
@@ -34,11 +34,12 @@ python rstest3.py
 
 | 脚本 | 功能 | 依赖 ROS2 |
 |------|------|-----------|
-| `run.py` | 一键检测 + 3D 坐标 + 面板法向量 + 深度可视化 | 否 |
-| `rstest3.py` | 完整版：检测 + 3D + 面板法向量 + ROS2 发布 | 是 |
+| `run.py` | 一键检测 + 3D 坐标 + 面板法向量 + 旋钮角度 + 深度可视化 | 否 |
+| `rstest3.py` | 完整版：检测 + 3D + 法向量 + 角度 + ROS2 话题发布 | 是 |
 | `record.py` | 相机录制，采集 YOLO 训练数据 | 否 |
+| `tools/test_video.py` | 离线视频测试，验证检测+角度效果，生成标注视频 | 否 |
 
-### run.py 命令行参数
+### run.py
 
 ```bash
 python run.py                        # 默认 best.pt + ONNX 推理
@@ -49,7 +50,7 @@ python run.py --camera realsense     # 切换相机后端
 python run.py --no-depth             # 只检测不算 3D
 ```
 
-### record.py 录制数据
+### record.py
 
 ```bash
 python record.py                     # 启动录制
@@ -59,13 +60,62 @@ python record.py --res 1280 720      # 高分辨率
 # 快捷键: s=截图  r=暂停/继续  q=退出
 ```
 
-### ROS2 话题
+### tools/test_video.py
 
 ```bash
-# rstest3.py 发布的话题
-ros2 topic echo /detection_3d        # Detection3DArray: 3D坐标 + 法向量四元数
-ros2 topic echo /detection_coords    # String: {'xyz': [...], 'panel_normal': [...]}
+python tools/test_video.py                          # 自动找最新录制
+python tools/test_video.py -i recordings/xxx/color.mp4 --save   # 指定视频，保存结果
+python tools/test_video.py --no-show --max-frames 500           # 无 GUI 纯跑数
+python tools/test_video.py --skip 400 --max-frames 800 --save   # 跳到有效区间
+# 显示模式下: 空格=暂停  q/ESC=退出
 ```
+
+### ROS2 话题（rstest3.py）
+
+```bash
+ros2 topic echo /panel/info      # PoseStamped: 面板中心坐标 + 法向量四元数
+ros2 topic echo /panel/knobs     # JSON: 旋钮位置 + 角度 + 标签
+ros2 topic echo /panel/buttons   # JSON: 按钮位置 + 标签
+```
+
+**`/panel/knobs` 消息格式:**
+```json
+{
+  "stamp": 1234567890.123,
+  "knobs": [
+    {"label": "knob_0", "position": {"x": 0.12, "y": -0.05, "z": 0.83}, "angle": 312.0, "confidence": 0.95}
+  ]
+}
+```
+
+**`/panel/buttons` 消息格式:**
+```json
+{
+  "stamp": 1234567890.123,
+  "buttons": [
+    {"label": "button_0", "position": {"x": 0.15, "y": -0.02, "z": 0.82}, "confidence": 0.91}
+  ]
+}
+```
+
+目标按空间位置排序（上到下、左到右），标签 `knob_0/1/2...` 跨帧稳定。
+
+## 旋钮角度估计
+
+基于传统 CV，无需额外模型：
+1. 自适应二值化（局部高斯 + OTSU + 固定阈值，自动选最佳）
+2. 形态学去噪
+3. 轮廓筛选（面积 + 长宽比）
+4. fitLine 拟合方向 + 质心消解 180 度歧义
+
+以 12 点钟方向为 0 度，顺时针增加，范围 [0, 360)。
+
+**离线测试结果:**
+
+| 视频 | 检出帧率 | 旋钮数 | 角度成功率 |
+|------|---------|--------|-----------|
+| 173951 | 62.9% | 1432 | 86.1% |
+| 175403 | 78.2% | 1943 | 90.1% |
 
 ## 配置文件
 
@@ -92,6 +142,19 @@ threshold:
   confidence: 0.3
   iou: 0.01
 device: 'cpu'
+
+# 旋钮角度
+knob_angle:
+  enable: true
+  binary_thresh: 180
+  circle_mask_ratio: 0.85
+  knob_class: 'knob'
+
+# ROS2 话题
+ros2_topics:
+  panel_info: '/panel/info'
+  knobs: '/panel/knobs'
+  buttons: '/panel/buttons'
 ```
 
 ## 项目结构
@@ -101,8 +164,8 @@ device: 'cpu'
 ├── run.py                   # 一键检测（推荐入口）
 ├── rstest3.py               # ROS2 版完整检测
 ├── record.py                # 数据录制
-├── best.pt                  # 自训练模型权重
-├── best.onnx                # ONNX 格式模型（自动导出）
+├── best.pt / best.onnx      # 模型权重
+├── knob_angle.py            # 旋钮角度估计模块
 ├── config/
 │   └── yolov5s.yaml         # 统一配置文件
 ├── camera/                  # 相机抽象层
@@ -113,10 +176,11 @@ device: 'cpu'
 ├── detector_onnx.py         # ONNX Runtime 推理器
 ├── detector_rknn.py         # RKNN NPU 推理器（待 NPU 驱动）
 ├── app_config.py            # 配置加载 + 后端工厂
+├── tools/
+│   ├── test_video.py        # 离线视频测试 + 效果验证
+│   └── convert_to_rknn.py   # PT→ONNX→RKNN 模型转换
 ├── models/                  # YOLOv5 模型定义
 ├── utils/                   # YOLOv5 工具函数
-├── tools/
-│   └── convert_to_rknn.py   # PT→ONNX→RKNN 模型转换
 ├── requirements.txt         # Python 依赖
 └── requirements_rk3588.txt  # RK3588 平台依赖说明
 ```
@@ -129,7 +193,7 @@ device: 'cpu'
 | ONNX Runtime (4线程) | ~80ms | **~12** | 当前默认 |
 | RKNN NPU | 预计 ~25ms | 30-48 | 待 NPU 驱动安装 |
 
-优化措施：ONNX Runtime 推理 + 异步取帧（独立线程，不阻塞推理）。
+优化措施：ONNX Runtime 推理 + 异步取帧（独立线程深拷贝，不阻塞推理）。
 
 ## 精度优化
 
@@ -168,5 +232,5 @@ Apache 2.0
 
 ---
 
-**最后更新**：2026-04-15
-**版本**：4.0 (RK3588 + Orbbec Gemini 336)
+**最后更新**: 2026-04-17
+**版本**: 4.1 (旋钮角度估计 + ROS2 话题改造)
