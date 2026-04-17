@@ -79,20 +79,22 @@ ros2 topic echo /panel/buttons   # JSON: 按钮位置 + 标签
 ```
 
 **`/panel/info` 消息格式 (PoseStamped):**
-```
-header:
-  stamp: {sec: ..., nanosec: ...}
-  frame_id: "camera_link"
-pose:
-  position:                    # 面板中心 3D 坐标（米）
-    x: 0.12
-    y: -0.03
-    z: 0.85
-  orientation:                 # 面板法向量四元数（末端执行器进近方向）
-    x: 0.01
-    y: 0.02
-    z: -0.03
-    w: 0.99
+```json
+{
+	header:
+	  stamp: {sec: ..., nanosec: ...}
+	  frame_id: "camera_link"
+	pose:
+	  position:                    # 面板中心 3D 坐标（米）
+	    x: 0.12
+	    y: -0.03
+	    z: 0.85
+	  orientation:                 # 面板法向量四元数（末端执行器进近方向）
+	    x: 0.01
+	    y: 0.02
+	    z: -0.01
+	    w: 0.99
+}
 ```
 每 10 帧更新一次并缓存，未检出目标时 position 为零、orientation 为单位四元数。
 
