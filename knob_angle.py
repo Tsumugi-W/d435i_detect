@@ -56,30 +56,53 @@ def estimate_knob_angle(
 
     masked_gray = cv2.bitwise_and(gray, gray, mask=circle_mask)
 
-    # ── 2. 二值化提取白色指针 ─────────────────────────────────────
-    # 先尝试 OTSU 自适应，如果效果不好 fallback 到固定阈值
+    # ── 2. 多策略二值化：自适应局部阈值 + 全局阈值，选最佳候选 ─────
+    circle_area = math.pi * radius * radius
+
+    candidates = []
+
+    # 策略 1: 自适应高斯（提取局部暗特征，如深色指针线）
+    adapt = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                  cv2.THRESH_BINARY_INV, 21, 5)
+    adapt = cv2.bitwise_and(adapt, circle_mask)
+    r = cv2.countNonZero(adapt) / circle_area if circle_area > 0 else 0
+    if 0.03 < r < 0.45:
+        candidates.append((r, adapt))
+
+    # 策略 2: OTSU 全局
     _, binary_otsu = cv2.threshold(masked_gray, 0, 255,
                                    cv2.THRESH_BINARY | cv2.THRESH_OTSU)
     binary_otsu = cv2.bitwise_and(binary_otsu, circle_mask)
-
-    _, binary_fixed = cv2.threshold(masked_gray, binary_thresh, 255,
-                                    cv2.THRESH_BINARY)
-    binary_fixed = cv2.bitwise_and(binary_fixed, circle_mask)
-
-    # 选择白色像素更少的那个（指针应该是小区域）
     otsu_white = cv2.countNonZero(binary_otsu)
-    fixed_white = cv2.countNonZero(binary_fixed)
-    circle_area = math.pi * radius * radius
+    otsu_r = otsu_white / circle_area if circle_area > 0 else 0
+    if 0.03 < otsu_r < 0.45:
+        candidates.append((otsu_r, binary_otsu))
+    # OTSU 反转
+    otsu_inv_r = 1 - otsu_r
+    if 0.03 < otsu_inv_r < 0.45:
+        b_inv = cv2.bitwise_not(binary_otsu)
+        b_inv = cv2.bitwise_and(b_inv, circle_mask)
+        candidates.append((otsu_inv_r, b_inv))
 
-    # 如果 OTSU 的白色区域太大（超过 40%），说明阈值太低，用固定阈值
-    if otsu_white > circle_area * 0.4:
-        binary = binary_fixed
+    # 策略 3: 固定阈值 — 亮区 / 暗区
+    for mode in [cv2.THRESH_BINARY, cv2.THRESH_BINARY_INV]:
+        _, b = cv2.threshold(masked_gray, binary_thresh, 255, mode)
+        b = cv2.bitwise_and(b, circle_mask)
+        r = cv2.countNonZero(b) / circle_area if circle_area > 0 else 0
+        if 0.03 < r < 0.45:
+            candidates.append((r, b))
+
+    if candidates:
+        # 选白色占比最小的（指针是细长小区域）
+        candidates.sort(key=lambda x: x[0])
+        binary = candidates[0][1]
     else:
-        binary = binary_otsu
+        # 全部策略都不在合理范围，用自适应结果兜底
+        binary = adapt
 
-    # ── 3. 形态学去噪 ────────────────────────────────────────────
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel, iterations=1)
+    # ── 3. 形态学去噪（小 ROI 用小 kernel）────────────────────────
+    k_size = 3 if min(h, w) > 60 else 2
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel, iterations=1)
 
     # ── 4. 轮廓检测 + 筛选指针 ───────────────────────────────────
@@ -89,7 +112,9 @@ def estimate_knob_angle(
         return (None, _build_debug(gray, circle_mask, binary, None)) if debug else None
 
     # 按面积排序，找到符合指针特征的轮廓
-    min_area = circle_area * min_pointer_area_ratio
+    # 对小 ROI（<80px）降低面积下限，指针轮廓本身就很小
+    effective_min_ratio = min_pointer_area_ratio * 0.3 if min(h, w) < 80 else min_pointer_area_ratio
+    min_area = max(circle_area * effective_min_ratio, 5)  # 至少 5 像素
     max_area = circle_area * max_pointer_area_ratio
 
     pointer_contour = None

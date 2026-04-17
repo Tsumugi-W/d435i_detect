@@ -42,8 +42,10 @@ class AsyncCamera:
         while self._running:
             result = self._cam.get_aligned_frames()
             if result[0] is not None:
+                # 深拷贝帧数据，防止 SDK 复用 buffer 导致主线程读到脏数据
+                c_int, d_int, color, depth = result
                 with self._lock:
-                    self._frame = result
+                    self._frame = (c_int, d_int, color.copy(), depth.copy())
 
     def get_aligned_frames(self):
         with self._lock:
