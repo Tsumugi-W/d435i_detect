@@ -39,3 +39,10 @@ knob_angle:
   binary_thresh: 180        # 二值化阈值（提取白色指针）
   circle_mask_ratio: 0.85   # 圆形 mask 比例（去除旋钮边框干扰）
   knob_class: 'knob'        # 旋钮类别名称（与 class_name 中一致）
+
+####################################
+# ROS2 话题配置
+ros2_topics:
+  panel_info: '/panel/info'
+  knobs: '/panel/knobs'
+  buttons: '/panel/buttons'

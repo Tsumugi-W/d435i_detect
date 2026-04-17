@@ -6,8 +6,8 @@
 
 ## 当前状态
 
-- `/detection_3d` (Detection3DArray) — 所有目标混在一起，法向量重复挂在每个检测上
-- `/detection_coords` (String) — eval() 解析的 dict 字符串，不安全
+- `/detection_3d` (Detection3DArray) — **已移除**
+- `/detection_coords` (String) — **已移除**
 
 ## 改造后话题
 
@@ -66,36 +66,36 @@
 
 ### 1. rstest3.py — 发布逻辑重写
 
-- [ ] 新建 3 个 publisher 替换现有 2 个
+- [x] 新建 3 个 publisher 替换现有 2 个
   - `self.panel_info_pub = create_publisher(PoseStamped, '/panel/info', 10)`
   - `self.knobs_pub = create_publisher(String, '/panel/knobs', 10)`
   - `self.buttons_pub = create_publisher(String, '/panel/buttons', 10)`
-- [ ] 删除旧的 `detection_pub` 和 `coords_pub`
-- [ ] 导入 `geometry_msgs.msg.PoseStamped` 和 `json`
-- [ ] 重写 `publish_detections()` 为 3 个独立发布方法：
+- [x] 删除旧的 `detection_pub` 和 `coords_pub`
+- [x] 导入 `geometry_msgs.msg.PoseStamped` 和 `json`
+- [x] 重写 `publish_detections()` 为 3 个独立发布方法：
   - `_publish_panel_info(panel_normal, panel_centroid)` — 每 N 帧调用
   - `_publish_knobs(knob_detections)` — 每帧调用
   - `_publish_buttons(button_detections)` — 每帧调用
 
 ### 2. 目标分拣 — 按 class_id 分离 knob 和 button
 
-- [ ] 在 `detection_callback` 中，检测结果按 class_name 分为两组
+- [x] 在 `detection_callback` 中，检测结果按 class_name 分为两组
   ```python
   knobs = []    # class_name == 'knob'
   buttons = []  # class_name == 'indicator_light_on' 或其他
   ```
-- [ ] 分别传给对应的发布方法
+- [x] 分别传给对应的发布方法
 
 ### 3. 稳定 label 生成 — 按空间位置排序
 
-- [ ] 新增 `_assign_labels(detections, prefix)` 方法
-- [ ] 对同类目标按 2D 位置排序（先 y 从上到下分行，同行按 x 从左到右）
-- [ ] 生成 `knob_0`, `knob_1`, ... 和 `button_0`, `button_1`, ...
-- [ ] 排序用 bbox 中心点，行分组阈值约为 bbox 高度的 0.5 倍
+- [x] 新增 `_assign_labels(detections, prefix)` 方法
+- [x] 对同类目标按 2D 位置排序（先 y 从上到下分行，同行按 x 从左到右）
+- [x] 生成 `knob_0`, `knob_1`, ... 和 `button_0`, `button_1`, ...
+- [x] 排序用 bbox 中心点，行分组阈值约为 bbox 高度的 0.5 倍
 
 ### 4. config/yolov5s.yaml — 话题配置
 
-- [ ] 新增 `ros2_topics` 配置段
+- [x] 新增 `ros2_topics` 配置段
   ```yaml
   ros2_topics:
     panel_info: '/panel/info'
@@ -105,17 +105,17 @@
 
 ### 5. run.py — 同步改动（可选）
 
-- [ ] run.py 不涉及 ROS2，无需改动
-- [ ] 但可考虑在终端输出中也按 knob/button 分组显示
+- [x] run.py 不涉及 ROS2，无需改动
+- [x] 终端输出中按 knob/button 分组显示（已在 run.py 中集成旋钮角度）
 
 ### 6. 测试验证
 
-- [ ] 在 RK3588 上运行 rstest3.py
+- [ ] 在 RK3588 上运行 rstest3.py（需连接相机）
 - [ ] `ros2 topic echo /panel/info` 确认法向量正确
 - [ ] `ros2 topic echo /panel/knobs` 确认 JSON 可解析，角度正确
 - [ ] `ros2 topic echo /panel/buttons` 确认按钮位置正确
 - [ ] 确认 label 跨帧稳定（同一旋钮编号不跳变）
-- [ ] 确认旧话题已移除
+- [ ] 确认旧话题已移除 ✅
 
 ---
 

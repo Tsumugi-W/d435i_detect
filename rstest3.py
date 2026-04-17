@@ -22,8 +22,10 @@ import cv2
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from geometry_msgs.msg import PoseStamped
 from vision_msgs.msg import Detection3DArray, Detection3D, ObjectHypothesisWithPose
 from collections import deque
+import json
 
 from depth_utils import (
     deproject_pixel_to_point, deproject_pixels_to_points,
@@ -295,21 +297,91 @@ class MultiFrameTracker:
         return fused
 
 
+# ── 稳定 label 生成 ──────────────────────────────────────────────
+def _assign_labels(detections, prefix):
+    """
+    按空间位置排序并分配稳定标签
+
+    先按 y 从上到下分行（同行 y 差 < bbox 高度 0.5 倍），同行按 x 从左到右。
+    生成 prefix_0, prefix_1, ...
+
+    Args:
+        detections: [(xyxy, xyz, conf, angle_or_none), ...]
+        prefix: 'knob' 或 'button'
+
+    Returns:
+        排序后的 detections，每项增加 'label' 字段
+    """
+    if not detections:
+        return []
+
+    # 计算 bbox 中心和典型高度
+    items = []
+    for det in detections:
+        xyxy = det['xyxy']
+        cy = (xyxy[1] + xyxy[3]) / 2
+        cx = (xyxy[0] + xyxy[2]) / 2
+        bh = xyxy[3] - xyxy[1]
+        items.append({**det, '_cx': cx, '_cy': cy, '_bh': bh})
+
+    # 按 y 排序
+    items.sort(key=lambda d: d['_cy'])
+
+    # 分行：y 差 < 平均高度 * 0.5 认为同行
+    avg_bh = np.mean([d['_bh'] for d in items]) if items else 50
+    rows = []
+    current_row = [items[0]]
+    for d in items[1:]:
+        if d['_cy'] - current_row[-1]['_cy'] < avg_bh * 0.5:
+            current_row.append(d)
+        else:
+            rows.append(current_row)
+            current_row = [d]
+    rows.append(current_row)
+
+    # 每行按 x 排序，分配 label
+    idx = 0
+    result = []
+    for row in rows:
+        row.sort(key=lambda d: d['_cx'])
+        for d in row:
+            d['label'] = f'{prefix}_{idx}'
+            idx += 1
+            result.append(d)
+
+    return result
+
+
 # ── ROS2 检测发布节点 ─────────────────────────────────────────────
 class DetectionPublisher(Node):
     def __init__(self):
         super().__init__('yolov5_detection_publisher_v3')
-        self.detection_pub = self.create_publisher(Detection3DArray, 'detection_3d', 10)
-        self.coords_pub = self.create_publisher(String, 'detection_coords', 10)
+
+        # 从配置读取话题名
+        topics = app_config.config.get('ros2_topics', {})
+        panel_topic = topics.get('panel_info', '/panel/info')
+        knobs_topic = topics.get('knobs', '/panel/knobs')
+        buttons_topic = topics.get('buttons', '/panel/buttons')
+
+        # 新话题结构
+        self.panel_info_pub = self.create_publisher(PoseStamped, panel_topic, 10)
+        self.knobs_pub = self.create_publisher(String, knobs_topic, 10)
+        self.buttons_pub = self.create_publisher(String, buttons_topic, 10)
 
         self.get_logger().info('YoloV5目标检测(面板法向量版)-程序启动')
+        self.get_logger().info(f'话题: {panel_topic}, {knobs_topic}, {buttons_topic}')
+
         # 根据配置选择推理后端
-        rknn_detector = app_config.create_detector()
-        if rknn_detector is not None:
-            self.model = rknn_detector
+        detector = app_config.create_detector()
+        if detector is not None:
+            self.model = detector
         else:
             self.model = YoloV5(yolov5_yaml_path='config/yolov5s.yaml')
         self.tracker = MultiFrameTracker(window_size=5, decay_factor=0.8)
+
+        # 获取类别名
+        self._class_names = getattr(self.model, 'class_names', None) or \
+            app_config.config.get('class_name', [])
 
         self._panel_normal_cache = None
         self._panel_normal_frame_count = 0
@@ -336,7 +408,6 @@ class DetectionPublisher(Node):
             t_end = time.time()
 
             filtered_depth = filter_depth(depth_image, method='bilateral', kernel_size=5)
-
             depth_scale = camera.get_depth_scale()
 
             # ── 面板法向量（每 N 帧更新一次）────────────────────────
@@ -350,15 +421,16 @@ class DetectionPublisher(Node):
                     if result is not None:
                         self._panel_normal_cache = result
 
-            panel_normal = None
+            panel_normal, panel_centroid = None, None
             if self._panel_normal_cache is not None:
                 panel_normal, panel_centroid = self._panel_normal_cache
                 n_disp = np.round(panel_normal, 3).tolist()
                 cv2.putText(canvas, 'panel_n:' + str(n_disp), (10, 80), 0, 0.7,
                             (0, 200, 255), thickness=2, lineType=cv2.LINE_AA)
 
-            # ── 逐目标 3D 坐标 ────────────────────────────────────
-            camera_xyz_list = []
+            # ── 逐目标 3D 坐标 + 分类 ────────────────────────────
+            knobs_raw, buttons_raw = [], []
+
             for i in range(len(xyxy_list)):
                 ux = int((xyxy_list[i][0] + xyxy_list[i][2]) / 2)
                 uy = int((xyxy_list[i][1] + xyxy_list[i][3]) / 2)
@@ -368,37 +440,55 @@ class DetectionPublisher(Node):
                                        sample_radius=3, depth_scale=depth_scale)
                 camera_xyz = deproject_pixel_to_point(depth_intrin, (ux_u, uy_u), dis)
                 camera_xyz = np.round(np.array(camera_xyz), 3).tolist()
-                camera_xyz_list.append(camera_xyz)
 
                 cv2.circle(canvas, (ux, uy), 4, (255, 255, 255), 5)
                 cv2.putText(canvas, str(camera_xyz), (ux + 20, uy + 10), 0, 0.7,
                             [225, 255, 255], thickness=2, lineType=cv2.LINE_AA)
 
-            # ── 旋钮角度估计 ─────────────────────────────────────
-            angle_list = [None] * len(xyxy_list)
-            if self._angle_enable:
-                class_names = getattr(self.model, 'class_names', None) or \
-                    app_config.config.get('class_name', [])
-                for i, xyxy in enumerate(xyxy_list):
-                    cls_name = class_names[class_id_list[i]] \
-                        if class_id_list[i] < len(class_names) else ''
-                    if cls_name != self._angle_knob_class:
-                        continue
-                    x1, y1 = int(xyxy[0]), int(xyxy[1])
-                    x2, y2 = int(xyxy[2]), int(xyxy[3])
-                    roi = color_image[y1:y2, x1:x2]
-                    angle = estimate_knob_angle(
-                        roi,
-                        binary_thresh=self._angle_binary_thresh,
-                        circle_mask_ratio=self._angle_circle_mask,
-                    )
-                    if angle is not None:
-                        angle_list[i] = angle
-                        draw_knob_angle(canvas, xyxy, angle)
+                # 获取类别名
+                cls_name = self._class_names[class_id_list[i]] \
+                    if i < len(class_id_list) and class_id_list[i] < len(self._class_names) \
+                    else ''
+                conf = float(conf_list[i]) if i < len(conf_list) else 0.0
 
-            self.publish_detections(camera_xyz_list, class_id_list, conf_list,
-                                    panel_normal, angle_list)
+                det_item = {
+                    'xyxy': list(map(float, xyxy_list[i])),
+                    'xyz': camera_xyz,
+                    'confidence': conf,
+                }
 
+                # 旋钮：估计角度
+                if cls_name == self._angle_knob_class:
+                    angle = None
+                    if self._angle_enable:
+                        x1, y1 = int(xyxy_list[i][0]), int(xyxy_list[i][1])
+                        x2, y2 = int(xyxy_list[i][2]), int(xyxy_list[i][3])
+                        roi = color_image[y1:y2, x1:x2]
+                        angle = estimate_knob_angle(
+                            roi,
+                            binary_thresh=self._angle_binary_thresh,
+                            circle_mask_ratio=self._angle_circle_mask,
+                        )
+                        if angle is not None:
+                            draw_knob_angle(canvas, xyxy_list[i], angle)
+                    det_item['angle'] = angle
+                    knobs_raw.append(det_item)
+                else:
+                    buttons_raw.append(det_item)
+
+            # ── 分配稳定 label ────────────────────────────────────
+            knobs = _assign_labels(knobs_raw, 'knob')
+            buttons = _assign_labels(buttons_raw, 'button')
+
+            # ── 发布 ─────────────────────────────────────────────
+            now = self.get_clock().now()
+            stamp_sec = now.nanoseconds / 1e9
+
+            self._publish_panel_info(panel_normal, panel_centroid, now)
+            self._publish_knobs(knobs, stamp_sec)
+            self._publish_buttons(buttons, stamp_sec)
+
+            n_total = len(knobs) + len(buttons)
             fps = int(1.0 / max(t_end - t_start, 1e-6))
             cv2.putText(canvas, 'FPS: {}'.format(fps), (50, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2, cv2.LINE_AA)
@@ -413,43 +503,60 @@ class DetectionPublisher(Node):
         except Exception as e:
             self.get_logger().error(f'Error: {e}')
 
-    def publish_detections(self, camera_xyz_list, class_id_list, conf_list,
-                           panel_normal=None, angle_list=None):
-        detection_array = Detection3DArray()
-        detection_array.header.stamp = self.get_clock().now().to_msg()
-        detection_array.header.frame_id = 'camera_link'
+    def _publish_panel_info(self, panel_normal, panel_centroid, now):
+        """发布面板位姿 PoseStamped"""
+        msg = PoseStamped()
+        msg.header.stamp = now.to_msg()
+        msg.header.frame_id = 'camera_link'
 
-        quat = normal_to_quaternion(panel_normal) if panel_normal is not None else None
+        if panel_centroid is not None:
+            msg.pose.position.x = float(panel_centroid[0])
+            msg.pose.position.y = float(panel_centroid[1])
+            msg.pose.position.z = float(panel_centroid[2])
 
-        for i, xyz in enumerate(camera_xyz_list):
-            detection = Detection3D()
-            detection.bbox.center.position.x = float(xyz[0])
-            detection.bbox.center.position.y = float(xyz[1])
-            detection.bbox.center.position.z = float(xyz[2])
-            if quat is not None:
-                detection.bbox.center.orientation.x = quat[0]
-                detection.bbox.center.orientation.y = quat[1]
-                detection.bbox.center.orientation.z = quat[2]
-                detection.bbox.center.orientation.w = quat[3]
-            if i < len(class_id_list):
-                hyp = ObjectHypothesisWithPose()
-                hyp.hypothesis.class_id = str(class_id_list[i])
-                hyp.hypothesis.score = float(conf_list[i])
-                detection.results.append(hyp)
-            detection_array.detections.append(detection)
+        if panel_normal is not None:
+            quat = normal_to_quaternion(panel_normal)
+            msg.pose.orientation.x = quat[0]
+            msg.pose.orientation.y = quat[1]
+            msg.pose.orientation.z = quat[2]
+            msg.pose.orientation.w = quat[3]
 
-        self.detection_pub.publish(detection_array)
+        self.panel_info_pub.publish(msg)
 
-        coords_msg = String()
-        angles = [angle_list[i] if angle_list else None
-                  for i in range(len(camera_xyz_list))]
-        coords_msg.data = str({
-            'xyz': camera_xyz_list,
-            'panel_normal': panel_normal.tolist() if panel_normal is not None else None,
-            'knob_angles': angles,
-        })
-        self.coords_pub.publish(coords_msg)
-        self.get_logger().info(f'Published {len(camera_xyz_list)} detections')
+    def _publish_knobs(self, knobs, stamp_sec):
+        """发布旋钮信息 JSON String"""
+        data = {
+            'stamp': stamp_sec,
+            'knobs': [
+                {
+                    'label': k['label'],
+                    'position': {'x': k['xyz'][0], 'y': k['xyz'][1], 'z': k['xyz'][2]},
+                    'angle': k.get('angle'),
+                    'confidence': k['confidence'],
+                }
+                for k in knobs
+            ]
+        }
+        msg = String()
+        msg.data = json.dumps(data, ensure_ascii=False)
+        self.knobs_pub.publish(msg)
+
+    def _publish_buttons(self, buttons, stamp_sec):
+        """发布按钮信息 JSON String"""
+        data = {
+            'stamp': stamp_sec,
+            'buttons': [
+                {
+                    'label': b['label'],
+                    'position': {'x': b['xyz'][0], 'y': b['xyz'][1], 'z': b['xyz'][2]},
+                    'confidence': b['confidence'],
+                }
+                for b in buttons
+            ]
+        }
+        msg = String()
+        msg.data = json.dumps(data, ensure_ascii=False)
+        self.buttons_pub.publish(msg)
 
 
 def main(args=None):
