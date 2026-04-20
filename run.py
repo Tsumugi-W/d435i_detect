@@ -19,7 +19,35 @@ import random
 import numpy as np
 import cv2
 
+import glob as _glob
+
 from camera import create_backend
+
+
+# ── 硬件温度读取 ─────────────────────────────────────────────────
+_THERMAL_ZONES = None
+
+def _read_soc_temp():
+    global _THERMAL_ZONES
+    if _THERMAL_ZONES is None:
+        _THERMAL_ZONES = {}
+        for z in sorted(_glob.glob('/sys/class/thermal/thermal_zone*')):
+            try:
+                name = open(f'{z}/type').read().strip()
+                if name in ('soc-thermal', 'bigcore0-thermal', 'gpu-thermal', 'npu-thermal'):
+                    _THERMAL_ZONES[name] = f'{z}/temp'
+            except Exception:
+                pass
+
+    parts = []
+    for name, path in _THERMAL_ZONES.items():
+        try:
+            t = int(open(path).read().strip()) / 1000
+            short = name.replace('-thermal', '')
+            parts.append(f'{short}:{t:.0f}C')
+        except Exception:
+            pass
+    return '  '.join(parts) if parts else ''
 from depth_utils import (
     deproject_pixel_to_point, undistort_pixel,
     filter_depth, get_robust_depth, compute_panel_normal,
@@ -316,10 +344,14 @@ def main():
                     if angle is not None:
                         draw_knob_angle(canvas, xyxy, angle)
 
-            # ── FPS + 深度伪彩色 ─────────────────────────────────
+            # ── FPS + 温度 + 深度伪彩色 ──────────────────────────
             fps_val = int(1.0 / max(t_end - t_start, 1e-6))
             cv2.putText(canvas, f'FPS: {fps_val}', (15, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+            temp_str = _read_soc_temp()
+            if temp_str:
+                cv2.putText(canvas, temp_str, (15, 58),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 200), 1, cv2.LINE_AA)
 
             depth_colormap = cv2.applyColorMap(
                 cv2.convertScaleAbs(depth_image, alpha=0.03), cv2.COLORMAP_JET)

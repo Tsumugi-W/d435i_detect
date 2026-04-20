@@ -46,3 +46,6 @@ ros2_topics:
   panel_info: '/panel/info'
   knobs: '/panel/knobs'
   buttons: '/panel/buttons'
+  color_image: '/camera/color/image_raw'
+  depth_image: '/camera/depth/image_raw'
+  camera_info: '/camera/color/camera_info'

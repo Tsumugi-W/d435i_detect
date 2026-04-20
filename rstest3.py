@@ -22,8 +22,10 @@ import cv2
 import rclpy
 from rclpy.node import Node
 from std_msgs.msg import String
+from sensor_msgs.msg import Image, CameraInfo
 from geometry_msgs.msg import PoseStamped
 from vision_msgs.msg import Detection3DArray, Detection3D, ObjectHypothesisWithPose
+from cv_bridge import CvBridge
 from collections import deque
 import json
 
@@ -70,6 +72,35 @@ class AsyncCamera:
         self._running = False
         self._thread.join(timeout=2)
         self._cam.stop()
+
+
+# ── 硬件温度读取 ─────────────────────────────────────────────────
+_THERMAL_ZONES = None
+
+def _read_soc_temp():
+    """读取 RK3588 关键温度，返回显示字符串"""
+    global _THERMAL_ZONES
+    # 首次调用时扫描 thermal zone
+    if _THERMAL_ZONES is None:
+        _THERMAL_ZONES = {}
+        import glob
+        for z in sorted(glob.glob('/sys/class/thermal/thermal_zone*')):
+            try:
+                name = open(f'{z}/type').read().strip()
+                if name in ('soc-thermal', 'bigcore0-thermal', 'gpu-thermal', 'npu-thermal'):
+                    _THERMAL_ZONES[name] = f'{z}/temp'
+            except Exception:
+                pass
+
+    parts = []
+    for name, path in _THERMAL_ZONES.items():
+        try:
+            t = int(open(path).read().strip()) / 1000
+            short = name.replace('-thermal', '')
+            parts.append(f'{short}:{t:.0f}C')
+        except Exception:
+            pass
+    return '  '.join(parts) if parts else ''
 
 
 # ── 复用基础工具函数 ─────────────────────────────────────────────
@@ -365,13 +396,21 @@ class DetectionPublisher(Node):
         knobs_topic = topics.get('knobs', '/panel/knobs')
         buttons_topic = topics.get('buttons', '/panel/buttons')
 
-        # 新话题结构
+        # 检测结果话题
         self.panel_info_pub = self.create_publisher(PoseStamped, panel_topic, 10)
         self.knobs_pub = self.create_publisher(String, knobs_topic, 10)
         self.buttons_pub = self.create_publisher(String, buttons_topic, 10)
 
+        # 图像话题
+        self.color_pub = self.create_publisher(Image, '/camera/color/image_raw', 10)
+        self.depth_pub = self.create_publisher(Image, '/camera/depth/image_raw', 10)
+        self.camera_info_pub = self.create_publisher(CameraInfo, '/camera/color/camera_info', 10)
+        self._cv_bridge = CvBridge()
+        self._camera_info_msg = None  # 延迟构建，等第一帧拿到内参
+
         self.get_logger().info('YoloV5目标检测(面板法向量版)-程序启动')
-        self.get_logger().info(f'话题: {panel_topic}, {knobs_topic}, {buttons_topic}')
+        self.get_logger().info(f'检测话题: {panel_topic}, {knobs_topic}, {buttons_topic}')
+        self.get_logger().info('图像话题: /camera/color/image_raw, /camera/depth/image_raw')
 
         # 根据配置选择推理后端
         detector = app_config.create_detector()
@@ -396,13 +435,63 @@ class DetectionPublisher(Node):
         self._angle_circle_mask = angle_cfg.get('circle_mask_ratio', 0.85)
         self._angle_knob_class = angle_cfg.get('knob_class', 'knob')
 
+        self._img_pub_counter = 0
+        self._img_pub_interval = 2  # 每 N 帧发布一次图像（降频，避免卡顿）
+
+        self._display_frame = None  # 供主线程显示的画面
+
         self.timer = self.create_timer(0.033, self.detection_callback)
+
+    def _build_camera_info(self, intrin):
+        """从内参构建 CameraInfo 消息（只构建一次）"""
+        msg = CameraInfo()
+        msg.header.frame_id = 'camera_link'
+        msg.width = intrin.width
+        msg.height = intrin.height
+        msg.distortion_model = 'plumb_bob'
+        msg.d = [float(c) for c in intrin.coeffs]
+        msg.k = [intrin.fx, 0.0, intrin.cx,
+                  0.0, intrin.fy, intrin.cy,
+                  0.0, 0.0, 1.0]
+        msg.p = [intrin.fx, 0.0, intrin.cx, 0.0,
+                  0.0, intrin.fy, intrin.cy, 0.0,
+                  0.0, 0.0, 1.0, 0.0]
+        msg.r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
+        return msg
+
+    def _publish_images(self, color_image, depth_image, now, intr):
+        """发布彩色图、深度图和相机内参"""
+        stamp = now.to_msg()
+
+        # 彩色图
+        color_msg = self._cv_bridge.cv2_to_imgmsg(color_image, encoding='bgr8')
+        color_msg.header.stamp = stamp
+        color_msg.header.frame_id = 'camera_link'
+        self.color_pub.publish(color_msg)
+
+        # 深度图 (16UC1, 单位 mm)
+        depth_msg = self._cv_bridge.cv2_to_imgmsg(depth_image, encoding='16UC1')
+        depth_msg.header.stamp = stamp
+        depth_msg.header.frame_id = 'camera_link'
+        self.depth_pub.publish(depth_msg)
+
+        # 相机内参（延迟构建）
+        if self._camera_info_msg is None:
+            self._camera_info_msg = self._build_camera_info(intr)
+        self._camera_info_msg.header.stamp = stamp
+        self.camera_info_pub.publish(self._camera_info_msg)
 
     def detection_callback(self):
         try:
             intr, depth_intrin, color_image, depth_image, _ = get_aligned_images()
             if intr is None or not depth_image.any() or not color_image.any():
                 return
+
+            # 发布图像话题（降频，避免序列化开销拖慢主循环）
+            now = self.get_clock().now()
+            self._img_pub_counter += 1
+            if self._img_pub_counter % self._img_pub_interval == 0:
+                self._publish_images(color_image, depth_image, now, intr)
 
             t_start = time.time()
             canvas, class_id_list, xyxy_list, conf_list = self.model.detect(color_image)
@@ -494,11 +583,13 @@ class DetectionPublisher(Node):
             fps = int(1.0 / max(t_end - t_start, 1e-6))
             cv2.putText(canvas, 'FPS: {}'.format(fps), (50, 50),
                         cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2, cv2.LINE_AA)
-            cv2.namedWindow('detection', cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
-            cv2.imshow('detection', canvas)
-            if cv2.waitKey(1) & 0xFF in (ord('q'), 27):
-                cv2.destroyAllWindows()
-                raise KeyboardInterrupt
+            temp_str = _read_soc_temp()
+            if temp_str:
+                cv2.putText(canvas, temp_str, (50, 85),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 2, cv2.LINE_AA)
+
+            # 存入共享变量，由主线程显示（避免 GUI 卡死）
+            self._display_frame = canvas
 
         except KeyboardInterrupt:
             pass
@@ -568,9 +659,20 @@ def main(args=None):
     camera = AsyncCamera(raw_cam)
 
     rclpy.init(args=args)
+    node = DetectionPublisher()
+
+    # ROS2 spin 放后台线程，主线程专跑 OpenCV GUI
+    spin_thread = threading.Thread(target=rclpy.spin, args=(node,), daemon=True)
+    spin_thread.start()
+
     try:
-        node = DetectionPublisher()
-        rclpy.spin(node)
+        cv2.namedWindow('detection', cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+        while rclpy.ok():
+            if node._display_frame is not None:
+                cv2.imshow('detection', node._display_frame)
+            key = cv2.waitKey(30) & 0xFF
+            if key in (ord('q'), 27):
+                break
     except KeyboardInterrupt:
         pass
     finally:

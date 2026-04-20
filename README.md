@@ -70,12 +70,30 @@ python tools/test_video.py --skip 400 --max-frames 800 --save   # 跳到有效�
 # 显示模式下: 空格=暂停  q/ESC=退出
 ```
 
+### tools/calibrate_charuco.py
+
+```bash
+python tools/calibrate_charuco.py                    # 实时采集 + 标定
+python tools/calibrate_charuco.py --images cal_imgs/ # 从已有图片标定
+python tools/calibrate_charuco.py --num 20           # 采集 20 张后标定
+# 操作: 空格/s=采集  c=标定  q=退出
+```
+
+标定板规格：ChArUco 5x7，DICT_5X5，方格 30mm，标记 22mm。
+标定结果保存到 `calibration/`（.npz + .yaml），自动与出厂内参对比。
+
 ### ROS2 话题（rstest3.py）
 
 ```bash
+# 检测结果
 ros2 topic echo /panel/info      # PoseStamped: 面板中心坐标 + 法向量四元数
 ros2 topic echo /panel/knobs     # JSON: 旋钮位置 + 角度 + 标签
 ros2 topic echo /panel/buttons   # JSON: 按钮位置 + 标签
+
+# 相机图像
+ros2 topic echo /camera/color/image_raw     # sensor_msgs/Image: BGR 彩色图
+ros2 topic echo /camera/depth/image_raw     # sensor_msgs/Image: 16UC1 深度图 (mm)
+ros2 topic echo /camera/color/camera_info   # sensor_msgs/CameraInfo: 内参
 ```
 
 **`/panel/info` 消息格式 (PoseStamped):**
@@ -196,6 +214,7 @@ ros2_topics:
 ├── app_config.py            # 配置加载 + 后端工厂
 ├── tools/
 │   ├── test_video.py        # 离线视频测试 + 效果验证
+│   ├── calibrate_charuco.py # ChArUco 标定板相机标定
 │   └── convert_to_rknn.py   # PT→ONNX→RKNN 模型转换
 ├── models/                  # YOLOv5 模型定义
 ├── utils/                   # YOLOv5 工具函数
@@ -211,7 +230,12 @@ ros2_topics:
 | ONNX Runtime (4线程) | ~80ms | **~12** | 当前默认 |
 | RKNN NPU | 预计 ~25ms | 30-48 | 待 NPU 驱动安装 |
 
-优化措施：ONNX Runtime 推理 + 异步取帧（独立线程深拷贝，不阻塞推理）。
+优化措施：
+- ONNX Runtime 推理（4 线程，比 PyTorch CPU 快 4 倍）
+- 异步取帧（独立线程深拷贝，不阻塞推理）
+- ROS2 spin 与 OpenCV GUI 线程分离（spin 后台线程，主线程专跑 imshow）
+- 图像话题降频发布（每 2 帧一次，避免序列化开销拖慢主循环）
+- 画面实时显示 SoC/CPU/GPU/NPU 温度
 
 ## 精度优化
 
@@ -251,4 +275,4 @@ Apache 2.0
 ---
 
 **最后更新**: 2026-04-17
-**版本**: 4.1 (旋钮角度估计 + ROS2 话题改造)
+**版本**: 4.2 (图像话题 + 标定工具 + 温度监控 + GUI 稳定性修复)
