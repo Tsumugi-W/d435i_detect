@@ -1,6 +1,6 @@
 '''
 by yzh 2022.2.13
-适配 RealSense D435i / Orbbec Gemini 336 统一相机后端
+适配 RealSense D435i / Orbbec Gemini 336 统一相机后端 
 '''
 # 导入依赖
 import random

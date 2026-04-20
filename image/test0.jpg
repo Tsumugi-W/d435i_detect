@@ -1,0 +1,5 @@
+#!/bin/bash
+
+export CLAUDE_CODE_USE_BEDROCK=1
+export AWS_BEARER_TOKEN_BEDROCK=099881f4-bfbb-4059-8ccd-ab85f352f226
+ex

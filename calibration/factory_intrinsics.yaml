@@ -1,0 +1,27 @@
+%YAML:1.0
+---
+color_fx: 460.20263671875
+color_fy: 459.98675537109375
+color_cx: 322.57876586914062
+color_cy: 240.583984375
+color_width: 640
+color_height: 480
+color_dist_coeffs: !!opencv-matrix
+   rows: 5
+   cols: 1
+   dt: d
+   data: [ 0.0089268991723656654, -0.046127341687679291,
+       -5.0555630878079683e-05, -1.3216094885137863e-05,
+       0.031883105635643005 ]
+depth_fx: 378.36947631835938
+depth_fy: 378.36947631835938
+depth_cx: 320.9000244140625
+depth_cy: 244.5
+depth_width: 640
+depth_height: 480
+depth_dist_coeffs: !!opencv-matrix
+   rows: 5
+   cols: 1
+   dt: d
+   data: [ 0., 0., 0., 0., 0. ]
+depth_scale: 0.001
