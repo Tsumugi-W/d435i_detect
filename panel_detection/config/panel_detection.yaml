@@ -1,0 +1,57 @@
+####################################
+# 相机配置
+camera_backend: 'orbbec'    # 'realsense' | 'orbbec'
+camera:
+  color_width: 640
+  color_height: 480
+  depth_width: 640
+  depth_height: 480
+  fps: 30
+
+# 推理后端配置
+inference_backend: 'onnx'     # 'pytorch' | 'onnx' | 'rknn'
+onnx_model: 'weights/best.onnx'
+onnx_threads: 4
+rknn_model: 'weights/best.rknn'
+
+####################################
+# YoloV5 模型配置
+weight: 'weights/best.pt'
+input_size: 640
+class_num: 6
+class_name: [ 'button', 'knob', 'bolt', 'nut', 'valve', 'pump' ]
+threshold:
+  iou: 0.01
+  confidence: 0.3
+device: 'cpu'
+
+####################################
+# 旋钮角度估计
+knob_angle:
+  enable: true
+  binary_thresh: 180
+  circle_mask_ratio: 0.85
+  knob_class: 'knob'
+
+####################################
+# ROS2 话题配置（每个类别独立话题）
+ros2_topics:
+  panel_info: '/panel/info'
+  buttons: '/panel/buttons'
+  knobs: '/panel/knobs'
+  bolts: '/panel/bolts'
+  nuts: '/panel/nuts'
+  valves: '/panel/valves'
+  pumps: '/panel/pumps'
+
+# 面板法向量更新间隔（帧数）
+panel_normal_interval: 10
+
+# 类别名 -> 话题 key 映射（一一对应）
+class_topic_mapping:
+  button: 'buttons'
+  knob: 'knobs'
+  bolt: 'bolts'
+  nut: 'nuts'
+  valve: 'valves'
+  pump: 'pumps'
