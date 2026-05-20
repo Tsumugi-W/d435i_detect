@@ -16,13 +16,13 @@ rknn_model: 'weights/yolov5s.rknn'
 
 ####################################
 # YoloV5模型权重路径
-weight:  "weights/yolov5s.pt"
+weight:  "newckpt/best.pt"
 # 输入图像的尺寸
 input_size: 640
 # 类别个数
-class_num:  2
+class_num:  6
 # 标签名称
-class_name: [ 'knob', 'indicator_light_on' ]
+class_name: [ 'button', 'knob', 'bolt', 'nut', 'valve', 'pump' ]
 # 阈值设置
 threshold:
   iou: 0.01
