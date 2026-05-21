@@ -45,10 +45,13 @@ class AsyncCamera:
 
     def _loop(self):
         while self._running:
-            result = self._cam.get_aligned_frames()
-            if result[0] is not None:
-                with self._lock:
-                    self._frame = result
+            try:
+                result = self._cam.get_aligned_frames()
+                if result[0] is not None:
+                    with self._lock:
+                        self._frame = result
+            except Exception:
+                time.sleep(0.1)
 
     def get_aligned_frames(self):
         with self._lock:

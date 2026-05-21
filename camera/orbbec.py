@@ -110,7 +110,10 @@ class OrbbecBackend(CameraBackend):
             camera_param.depth_intrinsic, camera_param.depth_distortion)
 
     def get_aligned_frames(self):
-        frames = self.pipeline.wait_for_frames(200)
+        try:
+            frames = self.pipeline.wait_for_frames(1000)
+        except Exception:
+            return None, None, None, None
         if frames is None:
             return None, None, None, None
 
@@ -119,7 +122,10 @@ class OrbbecBackend(CameraBackend):
             return None, None, None, None
 
         # 深度对齐到彩色
-        aligned = self.align_filter.process(frames)
+        try:
+            aligned = self.align_filter.process(frames)
+        except Exception:
+            return None, None, None, None
         if aligned is None:
             return None, None, None, None
 

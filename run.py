@@ -40,10 +40,14 @@ class AsyncCamera:
 
     def _loop(self):
         while self._running:
-            result = self._cam.get_aligned_frames()
-            if result[0] is not None:
-                with self._lock:
-                    self._frame = result
+            try:
+                result = self._cam.get_aligned_frames()
+                if result[0] is not None:
+                    with self._lock:
+                        self._frame = result
+            except Exception:
+                import time
+                time.sleep(0.1)
 
     def get_aligned_frames(self):
         with self._lock:
@@ -96,7 +100,7 @@ def create_detector(cfg, config_path, weight_override=None, backend_override=Non
 
     if backend == 'onnx':
         from detector_onnx import YoloV5ORT
-        onnx_path = weight.replace('.pt', '.onnx')
+        onnx_path = cfg.get('onnx_model', weight.replace('.pt', '.onnx'))
         threads = cfg.get('onnx_threads', 4)
         ort_det = YoloV5ORT(onnx_path=onnx_path, config_path=config_path, threads=threads)
         # 用模型权重推断类别名（onnx 没有内嵌 names，需要从 pt 加载）
@@ -196,7 +200,7 @@ def _plot_box(x, img, color, label=None, thickness=2):
 def main():
     parser = argparse.ArgumentParser(description='一键启动实时物体检测')
     parser.add_argument('--config', default='config/yolov5s.yaml', help='配置文件路径')
-    parser.add_argument('--weight', default='best.pt', help='模型权重路径')
+    parser.add_argument('--weight', default=None, help='模型权重路径 (默认从配置文件读取)')
     parser.add_argument('--camera', default=None, help='相机后端: orbbec / realsense')
     parser.add_argument('--backend', default=None, help='推理后端: pytorch / onnx / rknn')
     parser.add_argument('--no-depth', action='store_true', help='只检测不计算 3D 坐标')

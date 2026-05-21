@@ -10,19 +10,19 @@ camera:
 
 # 推理后端配置
 inference_backend: 'onnx'     # 'pytorch' | 'onnx' | 'rknn'
-onnx_model: 'best.onnx'
+onnx_model: 'weights/0520.onnx'
 onnx_threads: 4               # ONNX Runtime CPU 线程数
-rknn_model: 'weights/yolov5s.rknn'
+rknn_model: 'weights/0520.rknn'
 
 ####################################
 # YoloV5模型权重路径
-weight:  "newckpt/best.pt"
+weight:  "weights/0520.pt"
 # 输入图像的尺寸
 input_size: 640
 # 类别个数
-class_num:  6
+class_num:  7
 # 标签名称
-class_name: [ 'button', 'knob', 'bolt', 'nut', 'valve', 'pump' ]
+class_name: [ 'light', 'knob', 'bolt', 'nut', 'valve', 'pump', 'button' ]
 # 阈值设置
 threshold:
   iou: 0.01
