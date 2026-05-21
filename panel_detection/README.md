@@ -246,26 +246,107 @@ panel_detection/
 | ONNX Runtime (4线程) | ~80ms | **~12** | 当前默认 |
 | RKNN NPU | 预计 ~25ms | 30-48 | 待 NPU 驱动安装 |
 
-## 安装依赖
+## 新设备完整安装教程
+
+以下是在一台全新 RK3588 (Ubuntu 22.04) 设备上从零部署的完整步骤。
+
+### 1. 安装 ROS2 Humble
 
 ```bash
-# 创建虚拟环境
+sudo apt update && sudo apt install -y ros-humble-ros-base ros-humble-vision-msgs
+echo "source /opt/ros/humble/setup.bash" >> ~/.bashrc
+source ~/.bashrc
+```
+
+### 2. 克隆仓库到 ROS2 工作空间
+
+```bash
+mkdir -p ~/ros2_ws/src
+cd ~/ros2_ws/src
+git clone git@github.com:Tsumugi-W/d435i_detect.git -b ros2-package
+```
+
+### 3. 创建虚拟环境并安装 Python 依赖
+
+```bash
+cd ~/ros2_ws/src/d435i_detect
 python3 -m venv .venv
 source .venv/bin/activate
 pip install --upgrade pip
 
-# 安装依赖
 pip install torch==2.7.0 torchvision==0.22.0
 pip install pyorbbecsdk2
 pip install onnxruntime onnx
 pip install opencv-python numpy pyyaml
+```
 
-# Orbbec 相机 udev 权限
+### 4. 配置相机权限 (Orbbec)
+
+```bash
 sudo bash $(python3 -c "import pyorbbecsdk,os; print(os.path.dirname(pyorbbecsdk.__file__))")/shared/install_udev_rules.sh
 sudo udevadm control --reload-rules && sudo udevadm trigger
+```
 
-# ROS2 (如尚未安装)
-sudo apt install ros-humble-ros-base ros-humble-vision-msgs
+如果使用 RealSense 相机则改为：
+```bash
+pip install pyrealsense2
+# 并将 config/panel_detection.yaml 中 camera_backend 改为 'realsense'
+```
+
+### 5. 导出 ONNX 模型 (可选)
+
+如果 `panel_detection/weights/0520.onnx` 已存在则跳过此步。
+
+```bash
+cd ~/ros2_ws/src/d435i_detect
+PYTHONPATH=. python panel_detection/scripts/export_model.py \
+    --pt weights/0520.pt \
+    --output-dir panel_detection/weights/ \
+    --format onnx
+```
+
+### 6. 编译功能包
+
+```bash
+cd ~/ros2_ws
+source /opt/ros/humble/setup.bash
+source src/d435i_detect/.venv/bin/activate
+colcon build --packages-select panel_detection
+source install/setup.bash
+```
+
+### 7. 运行
+
+```bash
+# 推荐: 通过 launch 文件启动
+ros2 launch panel_detection panel_detection.launch.py
+
+# 或直接运行节点
+ros2 run panel_detection panel_detect_node
+```
+
+### 8. 验证
+
+```bash
+# 另开终端
+source ~/ros2_ws/install/setup.bash
+ros2 topic list            # 应看到 /panel/info, /panel/knobs 等话题
+ros2 topic echo /panel/knobs
+```
+
+### 日常使用
+
+每次新开终端需要：
+```bash
+source /opt/ros/humble/setup.bash
+source ~/ros2_ws/src/d435i_detect/.venv/bin/activate
+source ~/ros2_ws/install/setup.bash
+```
+
+建议写入 `~/.bashrc`：
+```bash
+echo "source ~/ros2_ws/install/setup.bash" >> ~/.bashrc
+echo "source ~/ros2_ws/src/d435i_detect/.venv/bin/activate" >> ~/.bashrc
 ```
 
 ## 许可证
