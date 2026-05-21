@@ -10,16 +10,16 @@ camera:
 
 # 推理后端配置
 inference_backend: 'onnx'     # 'pytorch' | 'onnx' | 'rknn'
-onnx_model: 'weights/0520.onnx'
+onnx_model: 'weights/best.onnx'
 onnx_threads: 4
-rknn_model: 'weights/0520.rknn'
+rknn_model: 'weights/best.rknn'
 
 ####################################
-# YoloV5 模型配置 (0520 权重, 7类)
-weight: 'weights/0520.pt'
+# YoloV5 模型配置
+weight: 'weights/best.pt'
 input_size: 640
-class_num: 7
-class_name: [ 'light', 'knob', 'bolt', 'nut', 'valve', 'pump', 'button' ]
+class_num: 6
+class_name: [ 'button', 'knob', 'bolt', 'nut', 'valve', 'pump' ]
 threshold:
   iou: 0.01
   confidence: 0.3
@@ -37,7 +37,6 @@ knob_angle:
 # ROS2 话题配置（每个类别独立话题）
 ros2_topics:
   panel_info: '/panel/info'
-  lights: '/panel/lights'
   buttons: '/panel/buttons'
   knobs: '/panel/knobs'
   bolts: '/panel/bolts'
@@ -50,10 +49,9 @@ panel_normal_interval: 10
 
 # 类别名 -> 话题 key 映射（一一对应）
 class_topic_mapping:
-  light: 'lights'
+  button: 'buttons'
   knob: 'knobs'
   bolt: 'bolts'
   nut: 'nuts'
   valve: 'valves'
   pump: 'pumps'
-  button: 'buttons'

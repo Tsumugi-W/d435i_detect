@@ -10,7 +10,6 @@ ROS2 面板位姿检测节点
   /panel/valves   (std_msgs/String, JSON)     — 阀门位置
   /panel/pumps    (std_msgs/String, JSON)     — 泵位置
 """
-import sys
 import os
 import math
 import json
@@ -25,18 +24,14 @@ from rclpy.node import Node
 from std_msgs.msg import String
 from geometry_msgs.msg import PoseStamped
 
-# 将上级目录加入 path，以复用现有模块
-_PROJECT_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
-if _PROJECT_ROOT not in sys.path:
-    sys.path.insert(0, _PROJECT_ROOT)
-
-from camera import create_backend
-from camera.base import CameraIntrinsics
-from depth_utils import (
+# 包内导入
+from .camera import create_backend
+from .camera.base import CameraIntrinsics
+from .depth_utils import (
     deproject_pixel_to_point, undistort_pixel,
     filter_depth, get_robust_depth, compute_panel_normal,
 )
-from knob_angle import estimate_knob_angle
+from .knob_angle import estimate_knob_angle
 
 
 class AsyncCamera:
@@ -126,8 +121,15 @@ class PanelDetectionNode(Node):
         config_path = self.get_parameter('config_path').get_parameter_value().string_value
 
         if not config_path:
-            config_path = os.path.join(
-                os.path.dirname(__file__), '..', 'config', 'panel_detection.yaml')
+            # 从 ament share 目录查找配置文件
+            try:
+                from ament_index_python.packages import get_package_share_directory
+                config_path = os.path.join(
+                    get_package_share_directory('panel_detection'), 'config', 'panel_detection.yaml')
+            except Exception:
+                # fallback: 相对于源码目录
+                config_path = os.path.join(
+                    os.path.dirname(__file__), '..', 'config', 'panel_detection.yaml')
 
         self.get_logger().info(f'加载配置: {config_path}')
         with open(config_path, 'r', encoding='utf-8') as f:
@@ -156,20 +158,41 @@ class PanelDetectionNode(Node):
             'pump': 'pumps',
         })
 
-        # 初始化相机
+        # 初始化相机（支持重试，等待设备连接）
         backend_type = self.cfg.get('camera_backend', 'orbbec')
         cam_cfg = self.cfg.get('camera', {})
-        raw_cam = create_backend(backend_type)
-        raw_cam.initialize(
-            cam_cfg.get('color_width', 640),
-            cam_cfg.get('color_height', 480),
-            cam_cfg.get('depth_width', 640),
-            cam_cfg.get('depth_height', 480),
-            cam_cfg.get('fps', 30),
-        )
-        self._camera = AsyncCamera(raw_cam)
-        self._depth_scale = self._camera.get_depth_scale()
-        self.get_logger().info(f'相机已启动: {backend_type}, depth_scale={self._depth_scale}')
+        self._camera = None
+        self._depth_scale = 0.001
+        self._camera_ready = False
+
+        max_retries = 10
+        retry_interval = 3.0
+        for attempt in range(1, max_retries + 1):
+            try:
+                raw_cam = create_backend(backend_type)
+                raw_cam.initialize(
+                    cam_cfg.get('color_width', 640),
+                    cam_cfg.get('color_height', 480),
+                    cam_cfg.get('depth_width', 640),
+                    cam_cfg.get('depth_height', 480),
+                    cam_cfg.get('fps', 30),
+                )
+                self._camera = AsyncCamera(raw_cam)
+                self._depth_scale = self._camera.get_depth_scale()
+                self._camera_ready = True
+                self.get_logger().info(
+                    f'相机已启动: {backend_type}, depth_scale={self._depth_scale}')
+                break
+            except Exception as e:
+                self.get_logger().warn(
+                    f'相机初始化失败 (尝试 {attempt}/{max_retries}): {e}')
+                if attempt < max_retries:
+                    self.get_logger().info(
+                        f'{retry_interval}秒后重试...')
+                    time.sleep(retry_interval)
+                else:
+                    self.get_logger().error(
+                        f'相机初始化失败，已重试 {max_retries} 次。节点将等待相机连接...')
 
         # 初始化检测器
         self._detector = self._create_detector(config_path)
@@ -188,21 +211,28 @@ class PanelDetectionNode(Node):
         self._frame_count = 0
         self._normal_interval = self.cfg.get('panel_normal_interval', 10)
 
+        # 重连相关
+        self._reconnect_interval = 5.0  # 秒
+        self._last_reconnect_time = 0.0
+
         # 定时回调 (~30Hz)
         self._timer = self.create_timer(0.033, self._detection_callback)
-        self.get_logger().info('面板检测节点已启动')
+        if self._camera_ready:
+            self.get_logger().info('面板检测节点已启动')
+        else:
+            self.get_logger().info('面板检测节点已启动（等待相机连接）')
 
     def _create_detector(self, config_path):
         backend = self.cfg.get('inference_backend', 'onnx')
 
         if backend == 'rknn':
-            from detector_rknn import YoloV5RKNN
+            from .detector_rknn import YoloV5RKNN
             rknn_model = self.cfg.get('rknn_model', 'weights/best.rknn')
             self.get_logger().info(f'推理后端: RKNN NPU ({rknn_model})')
             return YoloV5RKNN(rknn_model_path=rknn_model, config_path=config_path)
 
         if backend == 'onnx':
-            from detector_onnx import YoloV5ORT
+            from .detector_onnx import YoloV5ORT
             onnx_path = self.cfg.get('onnx_model', 'weights/best.onnx')
             threads = self.cfg.get('onnx_threads', 4)
             self.get_logger().info(f'推理后端: ONNX Runtime ({onnx_path})')
@@ -233,7 +263,38 @@ class PanelDetectionNode(Node):
         except Exception as e:
             self.get_logger().warn(f'无法从 {pt_path} 加载类别名: {e}')
 
+    def _try_reconnect_camera(self):
+        """定时尝试重新连接相机"""
+        now = time.time()
+        if now - self._last_reconnect_time < self._reconnect_interval:
+            return
+        self._last_reconnect_time = now
+
+        backend_type = self.cfg.get('camera_backend', 'orbbec')
+        cam_cfg = self.cfg.get('camera', {})
+        try:
+            raw_cam = create_backend(backend_type)
+            raw_cam.initialize(
+                cam_cfg.get('color_width', 640),
+                cam_cfg.get('color_height', 480),
+                cam_cfg.get('depth_width', 640),
+                cam_cfg.get('depth_height', 480),
+                cam_cfg.get('fps', 30),
+            )
+            self._camera = AsyncCamera(raw_cam)
+            self._depth_scale = self._camera.get_depth_scale()
+            self._camera_ready = True
+            self.get_logger().info(
+                f'相机已连接: {backend_type}, depth_scale={self._depth_scale}')
+        except Exception:
+            pass  # 静默等待下次重试
+
     def _detection_callback(self):
+        if not self._camera_ready:
+            # 尝试重新连接相机
+            self._try_reconnect_camera()
+            return
+
         color_intrin, depth_intrin, color_image, depth_image = \
             self._camera.get_aligned_frames()
         if color_intrin is None:
@@ -362,7 +423,8 @@ def main(args=None):
         pass
     finally:
         if node is not None:
-            node._camera.stop()
+            if node._camera is not None:
+                node._camera.stop()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

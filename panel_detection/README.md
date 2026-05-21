@@ -1,14 +1,26 @@
 # panel_detection
 
-基于 YOLOv5 + 深度相机的 ROS2 面板位姿检测功能包。
+自包含的 ROS2 面板位姿检测功能包。
 
-检测操作面板上的旋钮、按钮、螺栓、螺母、阀门、泵共 6 类目标，实时发布 3D 坐标和面板法向量。支持 ONNX Runtime CPU 推理和 RK3588 NPU 加速。
+基于 YOLOv5 + 深度相机，检测操作面板上的指示灯、旋钮、按钮、螺栓、螺母、阀门、泵共 7 类目标，实时发布 3D 坐标、面板法向量和旋钮角度。
+
+## 平台
+
+| 项目 | 配置 |
+|------|------|
+| SoC | RK3588 (aarch64) |
+| 相机 | 奥比中光 Gemini 336 |
+| 推理 | ONNX Runtime CPU (~12 FPS) |
+| ROS2 | Humble |
+
+同时保留 Intel RealSense D435i 后端兼容。
 
 ## 检测类别与话题
 
 | 话题 | 类别 | 消息类型 | 说明 |
 |------|------|----------|------|
 | `/panel/info` | 面板整体 | `geometry_msgs/PoseStamped` | 面板中心 + 法向量四元数 |
+| `/panel/lights` | light | `std_msgs/String` (JSON) | 指示灯位置 |
 | `/panel/buttons` | button | `std_msgs/String` (JSON) | 按钮位置 |
 | `/panel/knobs` | knob | `std_msgs/String` (JSON) | 旋钮位置 + 角度 |
 | `/panel/bolts` | bolt | `std_msgs/String` (JSON) | 螺栓位置 |
@@ -21,8 +33,8 @@
 - ROS2 Humble / Iron
 - Python 3.8+
 - OpenCV, NumPy, PyYAML
-- ONNX Runtime（CPU 推理）或 rknn-toolkit-lite2（NPU 推理）
-- pyorbbecsdk（Orbbec 相机）或 pyrealsense2（RealSense 相机）
+- ONNX Runtime (CPU 推理) 或 rknn-toolkit-lite2 (NPU 推理)
+- pyorbbecsdk (Orbbec 相机) 或 pyrealsense2 (RealSense 相机)
 
 ## 准备工作空间
 
@@ -45,7 +57,7 @@ python panel_detection/scripts/export_model.py \
     --output-dir panel_detection/weights/ \
     --format onnx
 
-# 导出 ONNX + RKNN（需 x86 + rknn-toolkit2）
+# 导出 ONNX + RKNN (需 x86 + rknn-toolkit2)
 python panel_detection/scripts/export_model.py \
     --pt newckpt/best.pt \
     --output-dir panel_detection/weights/ \
@@ -63,7 +75,7 @@ source install/setup.bash
 ## 运行
 
 ```bash
-# launch 文件启动（推荐）
+# launch 文件启动 (推荐)
 ros2 launch panel_detection panel_detection.launch.py
 
 # 指定自定义配置文件
@@ -83,7 +95,7 @@ ros2 topic list
 # 查看面板位姿
 ros2 topic echo /panel/info
 
-# 查看旋钮（含角度）
+# 查看旋钮 (含角度)
 ros2 topic echo /panel/knobs
 
 # 查看发布频率
@@ -135,6 +147,17 @@ pose:
 }
 ```
 
+## 旋钮角度估计
+
+支持两种旋钮类型的自动识别：
+
+| 旋钮类型 | 检测方法 | 说明 |
+|----------|----------|------|
+| 白色指针旋钮 | 灰度二值化 + 轮廓方向 | 黑色旋钮上有白色标记线 |
+| 彩色把手旋钮 | 自适应阈值 + 形状方向 | 红色/棕色旋转把手 |
+
+角度以 12 点钟方向为 0 度，顺时针增加，范围 [0, 360)。
+
 ## 在机器人端订阅
 
 ```python
@@ -171,14 +194,14 @@ class PanelSubscriber(Node):
 配置文件位于 `config/panel_detection.yaml`，主要配置项：
 
 ```yaml
-# 相机后端：orbbec / realsense
+# 相机后端: orbbec / realsense
 camera_backend: 'orbbec'
 
-# 推理后端：onnx / rknn / pytorch
+# 推理后端: onnx / rknn / pytorch
 inference_backend: 'onnx'
 
-# 模型类别（与权重一致）
-class_name: [ 'button', 'knob', 'bolt', 'nut', 'valve', 'pump' ]
+# 模型类别 (与权重一致)
+class_name: [ 'light', 'knob', 'bolt', 'nut', 'valve', 'pump', 'button' ]
 
 # 旋钮角度估计开关
 knob_angle:
@@ -198,12 +221,53 @@ panel_detection/
 │   └── panel_detection.launch.py
 ├── scripts/
 │   └── export_model.py         # 模型转换 (.pt -> .onnx/.rknn)
-├── weights/                    # 放置转换后的模型文件
+├── weights/                    # 模型文件
+│   └── 0520.onnx
 ├── resource/
 │   └── panel_detection
-└── panel_detection/
+└── panel_detection/            # Python 包 (自包含所有代码)
     ├── __init__.py
-    └── node_panel_detect.py    # 核心检测节点
+    ├── node_panel_detect.py    # ROS2 检测节点
+    ├── camera/                 # 相机抽象层
+    │   ├── __init__.py
+    │   ├── base.py             # CameraBackend ABC + CameraIntrinsics
+    │   ├── orbbec.py           # Orbbec Gemini 336 后端
+    │   └── realsense.py        # RealSense D435i 后端
+    ├── depth_utils.py          # 深度处理: 反投影、去畸变、滤波、面板法向量
+    ├── detector_onnx.py        # ONNX Runtime 推理器
+    ├── detector_rknn.py        # RKNN NPU 推理器
+    └── knob_angle.py           # 旋钮角度估计 (白色指针 + 彩色把手)
 ```
 
-节点运行时复用项目根目录的 `camera/`、`depth_utils.py`、`knob_angle.py`、`detector_onnx.py` 等模块，无需复制代码。
+## 推理性能
+
+| 后端 | 推理耗时 | FPS | 说明 |
+|------|---------|-----|------|
+| ONNX Runtime (4线程) | ~80ms | **~12** | 当前默认 |
+| RKNN NPU | 预计 ~25ms | 30-48 | 待 NPU 驱动安装 |
+
+## 安装依赖
+
+```bash
+# 创建虚拟环境
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+
+# 安装依赖
+pip install torch==2.7.0 torchvision==0.22.0
+pip install pyorbbecsdk2
+pip install onnxruntime onnx
+pip install opencv-python numpy pyyaml
+
+# Orbbec 相机 udev 权限
+sudo bash $(python3 -c "import pyorbbecsdk,os; print(os.path.dirname(pyorbbecsdk.__file__))")/shared/install_udev_rules.sh
+sudo udevadm control --reload-rules && sudo udevadm trigger
+
+# ROS2 (如尚未安装)
+sudo apt install ros-humble-ros-base ros-humble-vision-msgs
+```
+
+## 许可证
+
+Apache 2.0
